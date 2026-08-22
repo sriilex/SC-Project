@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Data files — teammates fetch via datasets/ scripts, see datasets/DATA_SOURCES.md
+datasets/**/*.xlsx
+datasets/**/*.xls
+datasets/**/*.csv
+datasets/**/*.parquet
+datasets/**/*.zip
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.uv-cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
