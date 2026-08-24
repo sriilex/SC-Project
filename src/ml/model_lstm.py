@@ -130,7 +130,7 @@ def predict(
     if len(X_all) == 0:
         raise ValueError("No valid training windows found.")
         
-    dates = np.array([m[0].toordinal() for m in meta_all])
+    dates = np.array([m[0] for m in meta_all])
     sort_idx = np.argsort(dates)
     
     X_all = X_all[sort_idx]
