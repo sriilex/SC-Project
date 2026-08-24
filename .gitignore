@@ -1,25 +1,41 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-.venv/
-*.egg-info/
-dist/
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+venv/
+env/
+ENV/
 build/
+develop-eggs/
+.eggs/
+dist/
+.downloads/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Data files — teammates fetch via datasets/ scripts, see datasets/DATA_SOURCES.md
-datasets/**/*.xlsx
-datasets/**/*.xls
-datasets/**/*.csv
-datasets/**/*.parquet
-datasets/**/*.zip
+# PyInstaller
+*.manifest
+*.spec
 
-# Tooling caches
-.ruff_cache/
-.pytest_cache/
-.uv-cache/
+# Text editors
+*.swp
+*.swo
+*~
 
-# Editors / OS
+# IDE
 .vscode/
 .idea/
-.DS_Store
-Thumbs.db
+*.code-workspace
+
+# Environments
+.venv
+venv
+env
+ENV

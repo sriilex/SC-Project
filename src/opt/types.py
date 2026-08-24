@@ -1,0 +1,189 @@
+"""Shared types and Pydantic models for the optimizer."""
+from __future__ import annotations
+
+from enum import Enum
+from datetime import date, datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, model_validator
+
+from opt.network import PortEnum, RouteFamily, RouteEnum
+
+class VesselClass(str, Enum):
+    CAPESIZE = "Capesize"
+    PANAMAX = "Panamax"
+    SUPRAMAX = "Supramax"
+    HANDYSIZE = "Handysize"
+
+class ForecastFan(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    vessel_class: VesselClass
+    horizon_days: Literal[7, 30, 90]
+    p10: float
+    p50: float
+    p90: float
+
+    @model_validator(mode='after')
+    def check_quantiles(self) -> 'ForecastFan':
+        if not (self.p10 <= self.p50 <= self.p90):
+            raise ValueError(f"Quantile order violated: p10={self.p10} p50={self.p50} p90={self.p90}")
+        if self.p10 <= 0:
+            raise ValueError("TCE forecasts must be positive USD/day values.")
+        return self
+
+class BasisEntry(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    route_family: RouteFamily
+    basis_mean: float
+    basis_std: float
+
+class Vessel(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    vessel_id: str
+    vessel_class: VesselClass
+    current_port: PortEnum
+    status: Literal["idle", "on_tc", "on_voyage"]
+    available_from: date
+    available_until: date | None = None
+    dwt: float
+    draft_m: float
+    speed_kn: float
+    fuel_consumption_tpd: float
+
+class CargoParcel(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    parcel_id: str
+    origin_port: PortEnum
+    dest_port: PortEnum
+    alternative_dest_ports: list[PortEnum] | None = None
+    commodity: str
+    volume_dwt: float
+    laycan_start: date
+    laycan_end: date
+    route_family: RouteFamily
+    revenue_usd: float
+
+class WeatherSeverity(str, Enum):
+    CYCLONE = "CYCLONE"
+    GALE = "GALE"
+    STORM = "STORM"
+    TROPICAL_DEPRESSION = "TROPICAL_DEPRESSION"
+
+class WeatherEvent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    event_id: str
+    route: RouteEnum
+    start_time: datetime
+    end_time: datetime
+    delay_hours: int  # Additional transit time caused by routing around or slowing down
+    severity: WeatherSeverity
+
+class PortLogisticsStatus(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    status_id: str
+    port: PortEnum
+    start_time: datetime
+    end_time: datetime
+    additional_wait_hours: int      # Added to anchorage/queue time
+    handling_rate_multiplier: float # e.g., 0.8 means 20% slower loading due to rail/truck congestion
+
+class OptimizerInputs(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    parcels: list[CargoParcel]
+    vessels: list[Vessel]
+    tc_quotes: dict[VesselClass, float]
+    planning_horizon_days: int
+    contract_term_days: int
+    forecasts: list[ForecastFan]
+    basis: dict[RouteFamily, BasisEntry]
+    
+    weather_events: list['WeatherEvent'] = []
+    port_events: list['PortLogisticsStatus'] = []
+    
+    risk_tolerance: float = 0.0
+    idle_penalty_usd_per_day: float = 500.0
+    ballast_penalty_usd_per_day: float = 250.0
+    late_delivery_penalty_usd_per_day: float = 2000.0
+
+class LockWaitResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    vessel_class: VesselClass
+    contract_term_days: int
+    ceiling_usd_per_day: float
+    today_quote_usd_per_day: float
+    action: Literal["LOCK", "WAIT"]
+    expected_spot_cost_usd_per_day: float
+    savings_p50_usd_per_day: float
+    savings_p10_usd_per_day: float
+    route_adjusted: bool
+
+class RejectedOption(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    
+    vessel_id: str
+    parcel_id: str
+    reason: str
+
+class VoyageAssignment(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    
+    vessel_id: str
+    parcel_id: str
+    dest_port: PortEnum
+    arrival_hours: int
+    wait_hours: int
+    start_operation_hours: int
+    finish_hours: int
+    ballast_hours: int
+    inter_cargo_gap_hours: int
+    profit_usd: float
+
+class RepositioningAction(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    
+    vessel_id: str
+    current_port: PortEnum
+    recommended_port: PortEnum
+    is_staying: bool
+
+class ReviewTrigger(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    
+    schedule: Literal["WEEKLY", "DAILY", "MONTHLY"]
+    conditions: list[str]
+
+class OptimizerRecommendation(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    # 1. Lock/wait + ceiling
+    target_vessel_class: VesselClass
+    lock_action: Literal["LOCK", "WAIT"]
+    ceiling_usd_per_day: float
+    tc_quote_usd_per_day: float
+    contract_term_days: int
+    optimal_entry_window_start_day: int | None = None
+    optimal_entry_window_end_day: int | None = None
+    optimal_entry_window_p50_usd: float | None = None
+    
+    # 2. Voyage schedule
+    voyage_assignments: list[VoyageAssignment]
+    rejected_options: list[RejectedOption]
+    total_voyage_profit_usd: float
+    
+    # 3. Repositioning
+    repositioning_actions: list[RepositioningAction]
+    
+    # 4. Savings, as a range
+    expected_savings_usd_per_day: float
+    p10_savings_usd_per_day: float
+    
+    # 5. Review trigger
+    review_trigger: ReviewTrigger
