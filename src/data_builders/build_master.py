@@ -251,6 +251,23 @@ def crosscheck(master: pl.DataFrame, series_ids: list[str]) -> None:
         LOGGER.info(f"crosscheck {sid}: max |diff| {names[0]} vs {names[1]} = {diff}")
 
 
+def read_macro_parquet(path: Path, series_id: str, val_col: str) -> pl.DataFrame:
+    if not path.exists():
+        LOGGER.warning(f"Macro parquet not found: {path.name}")
+        return pl.DataFrame(schema=MASTER_SCHEMA)
+    raw = pl.read_parquet(path)
+    return (
+        raw.select(
+            pl.lit(series_id).alias("series_id"),
+            pl.col("Date").cast(pl.Date).alias("date"),
+            pl.col(val_col).cast(pl.Float64).alias("value"),
+            pl.lit("index_pts").alias("unit"),
+            pl.lit("yahoo").alias("source"),
+        )
+        .drop_nulls()
+    )
+
+
 def main() -> None:
     """Assemble every raw source into data/master_long.parquet."""
     _setup_logging()
@@ -260,6 +277,8 @@ def main() -> None:
             read_handybulk(DATA_RAW / "handybulk_index_levels.csv"),
             read_portwatch_dir(DATA_RAW / "portwatch"),
             read_signal_dir(DATA_RAW / "signal_weekly"),
+            read_macro_parquet(DATA_RAW / "sp500_daily.parquet", "MACRO_SP500", "Close_^GSPC"),
+            read_macro_parquet(DATA_RAW / "dxy_daily.parquet", "MACRO_DXY", "Close_DX-Y.NYB"),
         ],
         how="vertical_relaxed",
     )

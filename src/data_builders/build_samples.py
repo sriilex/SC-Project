@@ -127,6 +127,11 @@ def main() -> None:
         cols_to_join.extend(congestion_feat.feature_names_out())
         cols_to_join.extend(cross_feat.feature_names_out())
         
+        # Add the new macroeconomic features from paper 1
+        for macro_feat in ["MACRO_SP500", "MACRO_DXY"]:
+            if macro_feat in master_wide.columns:
+                cols_to_join.append(macro_feat)
+        
         join_df = wide_with_cross.select(cols_to_join)
         
         df_target = df_target.join(join_df, on="date", how="left")
