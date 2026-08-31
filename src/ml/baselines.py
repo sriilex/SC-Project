@@ -14,7 +14,6 @@ import logging
 from pathlib import Path
 from typing import Final
 
-import lightgbm as lgb
 import polars as pl
 
 LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
@@ -31,13 +30,6 @@ EXCLUDE: Final[frozenset[str]] = frozenset(
      "y_step_h7", "y_step_h30", "y_step_h90",
      "y_mean_h7", "y_mean_h30", "y_mean_h90"}
 )
-LGB_PARAMS: Final[dict[str, object]] = {
-    "objective": "quantile",
-    "learning_rate": 0.05,
-    "num_leaves": 31,
-    "min_child_samples": 20,
-    "verbosity": -1,
-}
 
 
 def _setup_logging() -> None:
@@ -149,69 +141,6 @@ def make_matrix(df: pl.DataFrame, h: int) -> tuple[list[str], object]:
     return feats, mat
 
 
-def predict_lgbm(
-    train: pl.DataFrame, eval_frames: dict[str, pl.DataFrame], h: int
-) -> dict[str, pl.DataFrame]:
-    """Train pooled LightGBM quantile models on RETURNS with early stopping.
-
-    Targets are log-returns (y - log_value); predictions are added back to
-    the current level before evaluation. Early stopping uses a chronological
-    holdout carved from the tail of train, so outer valid/test stay untouched.
-    """
-    core_n = max(int(train.height * 0.85), train.height - 60)
-    tr = train.sort("date").head(core_n)
-    es = train.sort("date").tail(train.height - core_n)
-    names, x_tr = make_matrix(tr, h)
-    _, x_es = make_matrix(es, h)
-    y_tr = (tr[f"y_step_h{h}"] - tr["log_value"]).to_numpy()
-    y_es = (es[f"y_step_h{h}"] - es["log_value"]).to_numpy()
-    cat_idx = [names.index("target_class")]
-    per_quantile: dict[str, list[pl.DataFrame]] = {}
-    median_booster: lgb.Booster | None = None
-    for q in QUANTILES:
-        params = dict(LGB_PARAMS)
-        params["alpha"] = q
-        dtrain = lgb.Dataset(
-            x_tr, label=y_tr, feature_name=names,
-            categorical_feature=cat_idx, free_raw_data=True,
-        )
-        dval = lgb.Dataset(
-            x_es, label=y_es, reference=dtrain,
-            feature_name=names, categorical_feature=cat_idx, free_raw_data=True,
-        )
-        booster = lgb.train(
-            params, dtrain,
-            num_boost_round=2000,
-            valid_sets=[dval],
-            callbacks=[lgb.early_stopping(50, verbose=False)],
-        )
-        if q == 0.5:
-            median_booster = booster
-        for split_name, frame in eval_frames.items():
-            _, x = make_matrix(frame, h)
-            p = frame["log_value"].to_numpy() + booster.predict(x)
-            per_quantile.setdefault(split_name, []).append(
-                frame.select(
-                    pl.col("date"), pl.col("target_class"),
-                    pl.lit(h).cast(pl.Int64).alias("h"),
-                    pl.lit(p).alias(f"p_{q}"),
-                )
-            )
-    if median_booster is not None:
-        gains = sorted(
-            zip(names, median_booster.feature_importance("gain").tolist()),
-            key=lambda kv: kv[1], reverse=True,
-        )[:12]
-        LOGGER.info(f"h={h} top gains: {[k for k, _ in gains]}")
-    out: dict[str, pl.DataFrame] = {}
-    for split_name, frames in per_quantile.items():
-        joined = frames[0]
-        for fr in frames[1:]:
-            joined = joined.join(fr, on=["date", "target_class", "h"], how="inner")
-        out[split_name] = joined
-    return out
-
-
 def evaluate(
     pred: pl.DataFrame, source: pl.DataFrame, split: str, model: str
 ) -> list[dict[str, object]]:
@@ -244,9 +173,7 @@ def evaluate(
 
 def main() -> None:
     """Run all baselines, evaluate on valid/test, write metrics csv."""
-    from ml.model_lgbm_tuned import predict as predict_lgbm_tuned
-    from ml.model_lstm import predict as predict_lstm
-    from ml.model_xgb import predict as predict_xgb
+    from ml.models import MODELS
 
     _setup_logging()
     splits = {name: load_split(name) for name in ("train", "valid", "test")}
@@ -261,27 +188,15 @@ def main() -> None:
             "ar1": {
                 s: predict_ar1(splits[s], h, ar1_m) for s in ("valid", "test")
             },
-            "lgbm": predict_lgbm(
-                splits["train"],
-                {"valid": splits["valid"], "test": splits["test"]},
-                h,
-            ),
-            "lstm": predict_lstm(
-                splits["train"],
-                {"valid": splits["valid"], "test": splits["test"]},
-                h,
-            ),
-            "xgb": predict_xgb(
-                splits["train"],
-                {"valid": splits["valid"], "test": splits["test"]},
-                h,
-            ),
-            "lgbm_tuned": predict_lgbm_tuned(
-                splits["train"],
-                {"valid": splits["valid"], "test": splits["test"]},
-                h,
-            ),
         }
+        
+        # Dynamically evaluate all exported ML models
+        for model_name, predict_fn in MODELS.items():
+            candidates[model_name] = predict_fn(
+                splits["train"],
+                {"valid": splits["valid"], "test": splits["test"]},
+                h,
+            )
         for model, split_preds in candidates.items():
             for split_name, pred in split_preds.items():
                 all_rows.extend(evaluate(pred, splits[split_name], split_name, model))

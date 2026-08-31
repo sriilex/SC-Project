@@ -31,14 +31,42 @@ class QuantileLSTM(nn.Module):
     def __init__(self, n_features: int, hidden: int = 32) -> None:
         super().__init__()
         self.cls_emb = nn.Embedding(len(CLASSES), 2)
-        self.lstm = nn.LSTM(n_features, hidden, num_layers=2, batch_first=True)
-        self.heads = nn.Linear(hidden + 2, 3)
+        
+        # 1D-CNN (Local feature extraction)
+        cnn_out_channels = 64
+        self.conv1d = nn.Conv1d(in_channels=n_features, out_channels=cnn_out_channels, kernel_size=3, padding=1)
+        self.dropout1 = nn.Dropout(0.2)
+        
+        # BiLSTM
+        self.lstm = nn.LSTM(cnn_out_channels, hidden, num_layers=2, batch_first=True, bidirectional=True)
+        self.dropout2 = nn.Dropout(0.2)
+        
+        # Attention Mechanism
+        self.att_linear = nn.Linear(hidden * 2, hidden * 2)
+        self.att_v = nn.Linear(hidden * 2, 1, bias=False)
+        
+        # Final head (hidden*2 + 2 for class emb)
+        self.heads = nn.Linear(hidden * 2 + 2, 3)
 
     def forward(self, x_seq: torch.Tensor, cls_idx: torch.Tensor) -> torch.Tensor:
+        # x_seq: (batch, seq_len, features)
+        x_cnn = x_seq.permute(0, 2, 1)  # (batch, features, seq_len)
+        x_cnn = torch.relu(self.conv1d(x_cnn))
+        x_cnn = self.dropout1(x_cnn)
+        x_lstm_in = x_cnn.permute(0, 2, 1)  # (batch, seq_len, cnn_out)
+        
+        lstm_out, _ = self.lstm(x_lstm_in)  # (batch, seq_len, hidden * 2)
+        lstm_out = self.dropout2(lstm_out)
+        
+        # Attention over time steps
+        u = torch.tanh(self.att_linear(lstm_out))
+        att_scores = self.att_v(u)
+        att_weights = torch.softmax(att_scores, dim=1)
+        
+        context = torch.sum(lstm_out * att_weights, dim=1)  # (batch, hidden * 2)
+        
         emb = self.cls_emb(cls_idx)  # (batch, 2)
-        out, _ = self.lstm(x_seq)
-        summary = out[:, -1, :]      # (batch, hidden)
-        summary_emb = torch.cat([summary, emb], dim=-1)
+        summary_emb = torch.cat([context, emb], dim=-1)
         return self.heads(summary_emb)
 
 
@@ -153,12 +181,18 @@ def predict(
     c_es = c_all[core_n:]
     y_es = y_all[core_n:]
 
-    model = QuantileLSTM(n_features=len(feature_cols), hidden=32)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    LOGGER.info(f"Training on device: {device}")
+
+    model = QuantileLSTM(n_features=len(feature_cols), hidden=32).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     
     tr_ds = TensorDataset(X_tr, c_tr, y_tr)
     tr_dl = DataLoader(tr_ds, batch_size=64, shuffle=True)
     
+    if len(X_es) > 0:
+        X_es, c_es, y_es = X_es.to(device), c_es.to(device), y_es.to(device)
+        
     best_loss = float("inf")
     patience = 8
     patience_counter = 0
@@ -167,6 +201,7 @@ def predict(
     for epoch in range(100):
         model.train()
         for bx, bc, by in tr_dl:
+            bx, bc, by = bx.to(device), bc.to(device), by.to(device)
             optimizer.zero_grad()
             pred = model(bx, bc)
             loss = pinball_loss(pred, by)
@@ -202,8 +237,9 @@ def predict(
         X_eval, c_eval, _, meta_eval = create_windows(df_norm, h, feature_cols)
         
         if len(X_eval) > 0:
+            X_eval, c_eval = X_eval.to(device), c_eval.to(device)
             with torch.no_grad():
-                preds = model(X_eval, c_eval).numpy()
+                preds = model(X_eval, c_eval).cpu().numpy()
         else:
             preds = np.empty((0, 3))
             

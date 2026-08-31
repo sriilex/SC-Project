@@ -10,7 +10,7 @@ import polars as pl
 import xgboost as xgb
 
 from ml.baselines import load_split, make_matrix
-from ml.model_xgb import XGB_PARAMS
+from ml.models.xgb import XGB_PARAMS
 
 LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 
