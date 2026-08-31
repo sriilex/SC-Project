@@ -9,7 +9,7 @@ from typing import Final
 import polars as pl
 import xgboost as xgb
 
-from ml.baselines import load_split, make_matrix
+from ml.baselines import HORIZONS, load_split, make_matrix
 from ml.models.xgb import XGB_PARAMS
 
 LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
@@ -17,7 +17,6 @@ LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 DATA: Final[Path] = REPO_ROOT / "src" / "data"
 MODELS_DIR: Final[Path] = DATA / "models"
-HORIZONS: Final[tuple[int, ...]] = (7, 30, 90)
 
 
 def _setup_logging() -> None:

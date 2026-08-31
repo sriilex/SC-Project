@@ -1,0 +1,65 @@
+# Summary of Baltic Dry Index (BDI) Forecasting Research
+
+This document systematically summarizes the three provided research papers focusing on the Baltic Dry Index, outlining their objectives, methodologies, and performance metrics.
+
+---
+
+## 1. A Fuzzy Integrated Logical Forecasting Model for Dry Bulk Shipping Index Forecasting
+
+### What they were trying to do (Objective)
+The authors sought to develop an improved **Fuzzy Time Series (FTS)** methodology for short-term forecasting of the Baltic Dry Index (BDI). Recognizing that conventional FTS models struggle with highly volatile, non-stationary time series data, their objective was to propose two new algorithms—the Fuzzy Integrated Logical Forecasting (FILF) model and its extended version (E-FILF)—to achieve higher prediction accuracy than traditional benchmarks.
+
+### How they did it (Methodology)
+They built upon conventional FTS models but introduced novel adjustments to overcome data volatility:
+- **Differencing**: Applied first-order differencing to historical monthly BDI data (Jan 2001 - Nov 2008) before fuzzification to reduce standard deviation and handle directional trends.
+- **Latest Value Adjustment (FILF)**: Introduced an adjustment coefficient to create a combination function that integrates the last actual value and the raw forecasted value, correcting logical errors caused by immediate past market movements.
+- **Error Correction (E-FILF)**: Added an error correction function calculating a simple moving average (SMA) of past percentage errors over a backward horizon to push residuals closer to white noise.
+
+### Their metrics and results (How well they did it)
+- **Metrics**: Mean Absolute Percentage Error (MAPE), variance, and mean of error rates.
+- **Performance**: Both proposed models significantly outperformed classical benchmarks.
+  - **MAPE**: FILF achieved **0.1438** and E-FILF improved to **0.1408**, substantially better than classical benchmarks (~0.24).
+  - **Error Distribution**: Variance of errors was roughly **0.02** (vs. 0.07 for benchmarks), indicating a closer approximation to a white noise distribution. 
+
+---
+
+## 2. A New Exploration in Baltic Dry Index Forecasting Learning
+
+### What they were trying to do (Objective)
+The authors aimed to create a robust **Deep Learning Ensemble Model** to accurately predict the highly volatile and complex BDI time series. They wanted to address the limitations of standalone machine learning models (which are prone to over/undertraining) and provide accurate multi-day predictions rather than just single-day forecasts.
+
+### How they did it (Methodology)
+They developed a deep integrated model called **CNN-BiLSTM-AM** using 6,896 daily BDI observations (1995–2022).
+- **CNN (Convolutional Neural Network)**: Used first to extract features and reduce the dimensionality of the raw 1D time series.
+- **BiLSTM (Bi-directional Long Short-Term Memory)**: Processed CNN features forwards and backwards to learn temporal dependencies and solve long-term dependency issues.
+- **AM (Attention Mechanism)**: Assigned different importance weights to various past temporal feature states, focusing on the most relevant data points.
+The data was split 70:30 for training/testing, and the model was benchmarked against partial models like standalone CNN, LSTM, and CNN-LSTM.
+
+### Their metrics and results (How well they did it)
+- **Metrics**: Mean Squared Error (MSE) and Coefficient of Determination ($R^2$).
+- **Performance**: The proposed ensemble significantly outperformed all baselines.
+  - **$R^2$ Score**: Achieved an exceptional **96.9% (0.969)**, compared to 81.8% for standalone CNN and ~94% for other LSTM variants.
+  - **MSE**: Achieved the lowest error on the test set at **$2.1469 \times 10^{-4}$**.
+
+---
+
+## 3. Baltic Dry Index Forecast Using Financial Market Data: Machine Learning Methods and SHAP Explanations
+
+### What they were trying to do (Objective)
+The goal was to forecast the BDI using diverse **macroeconomic and financial market data** rather than relying solely on historical BDI values. Additionally, they wanted to make the model interpretable by uncovering and quantifying the specific economic drivers shaping the BDI.
+
+### How they did it (Methodology)
+- **Data Collection**: Used weekly average data (Jan 2018 - Jun 2023) across commodities (iron ore, coal, wheat, oil), currencies (DXY, Euro index), stock indices (S&P 500, Eurostoxx50, HSI), and volatility indices (VIX).
+- **Modeling**: Tested ten different machine learning algorithms for regression (Extra Trees, CatBoost, Random Forest, XGBoost, etc.).
+- **Interpretability**: Applied the **SHAP (Shapley Additive Explanations)** framework to the best models to measure the direction and magnitude of each financial feature's impact on predictions.
+
+### Their metrics and results (How well they did it)
+- **Metrics**: Mean Absolute Error (MAE), Mean Squared Error (MSE), Root Mean Squared Error (RMSE), and R².
+- **Performance**: **Extra Trees** was the best-performing algorithm.
+  - **Errors**: MAE of **182.53**, RMSE of **260.98**.
+  - **$R^2$ Score**: Achieved the highest R² of **0.88** (outperforming CatBoost at 0.84 and Random Forest at 0.79).
+- **Key Insights (SHAP)**:
+  - **S&P 500** was the most influential positive factor (rising S&P = rising BDI).
+  - **U.S. Dollar Index (DXY)** was the second most influential, but negatively correlated (strong dollar = lower BDI).
+  - **Commodities** (Iron ore, coal) had significant positive impacts, while volatility indices (VIX) surprisingly had minimal impact.
+

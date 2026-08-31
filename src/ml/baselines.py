@@ -20,15 +20,15 @@ LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 DATA: Final[Path] = REPO_ROOT / "src" / "data"
-HORIZONS: Final[tuple[int, ...]] = (7, 30, 90)
+HORIZONS: Final[tuple[int, ...]] = (1, 7, 30, 90)
 QUANTILES: Final[tuple[float, ...]] = (0.1, 0.5, 0.9)
 ZSCORES: Final[dict[float, float]] = {0.1: -1.2816, 0.5: 0.0, 0.9: 1.2816}
 CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax", "Handysize")
 CLASS_CODES: Final[dict[str, int]] = {c: i for i, c in enumerate(CLASSES)}
 EXCLUDE: Final[frozenset[str]] = frozenset(
-    {"date", "target_value", "log_value",
-     "y_step_h7", "y_step_h30", "y_step_h90",
-     "y_mean_h7", "y_mean_h30", "y_mean_h90"}
+    {"date", "target_value", "log_value"} | 
+    {f"y_step_h{h}" for h in HORIZONS} | 
+    {f"y_mean_h{h}" for h in HORIZONS}
 )
 
 
@@ -45,7 +45,7 @@ def load_split(name: str) -> pl.DataFrame:
     df = pl.read_parquet(DATA / f"samples_{name}.parquet")
     floats = [c for c, t in df.schema.items() if t == pl.Float64]
     df = df.with_columns([pl.col(c).fill_nan(None) for c in floats])
-    return df.drop_nulls(["log_value", "y_step_h7", "y_step_h30", "y_step_h90"])
+    return df.drop_nulls(["log_value"] + [f"y_step_h{h}" for h in HORIZONS])
 
 
 def pinball(y: pl.Series, p: pl.Series, q: float) -> float:

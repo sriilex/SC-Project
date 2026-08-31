@@ -61,6 +61,11 @@ class QuantileLSTM(nn.Module):
         # Attention over time steps
         u = torch.tanh(self.att_linear(lstm_out))
         att_scores = self.att_v(u)
+        
+        # Scale scores to prevent vanishing gradients in attention
+        scale_factor = (self.lstm.hidden_size * 2) ** 0.5
+        att_scores = att_scores / scale_factor
+        
         att_weights = torch.softmax(att_scores, dim=1)
         
         context = torch.sum(lstm_out * att_weights, dim=1)  # (batch, hidden * 2)
@@ -147,7 +152,7 @@ def predict(
             if m is None or np.isnan(m):
                 m = 0.0
             exprs.append(
-                ((pl.col(c) - m) / s).fill_null(0.0).alias(c)
+                ((pl.col(c) - m) / s).fill_nan(0.0).fill_null(0.0).alias(c)
             )
         return df.with_columns(exprs)
     
