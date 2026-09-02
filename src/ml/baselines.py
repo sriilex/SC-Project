@@ -150,7 +150,9 @@ def evaluate(
         "date", "target_class",
         pl.col(f"y_step_h{h}").alias("y"), pl.col("log_value"),
     )
-    j = pred.join(truth, on=["date", "target_class"], how="inner")
+    
+    j = truth.join(pred, on=["date", "target_class"], how="inner")
+    
     rows: list[dict[str, object]] = []
     scopes: list[tuple[str, pl.DataFrame | None]] = [("POOLED", None)]
     scopes += [(c, c) for c in CLASSES]
@@ -160,7 +162,10 @@ def evaluate(
             continue
         y = sub["y"]
         row: dict[str, object] = {
-            "split": split, "model": model, "scope": scope, "h": h, "n": sub.height,
+            "split": split,
+            "h": h,
+            "model": model,
+            "scope": scope,
         }
         for q in QUANTILES:
             row[f"pinball_{q}"] = pinball(y, sub[f"p_{q}"], q)
@@ -178,29 +183,28 @@ def main() -> None:
     _setup_logging()
     splits = {name: load_split(name) for name in ("train", "valid", "test")}
     all_rows: list[dict[str, object]] = []
+    
+    # 1. Evaluate Statistical / Simple Baselines per Horizon
     for h in HORIZONS:
-        rw_s = fit_rw_sigmas(splits["train"], h)
-        ar1_m = fit_ar1(splits["train"], h)
         candidates: dict[str, dict[str, pl.DataFrame]] = {
-            "rw": {
-                s: predict_rw(splits[s], h, rw_s) for s in ("valid", "test")
-            },
-            "ar1": {
-                s: predict_ar1(splits[s], h, ar1_m) for s in ("valid", "test")
-            },
         }
-        
-        # Dynamically evaluate all exported ML models
-        for model_name, predict_fn in MODELS.items():
-            candidates[model_name] = predict_fn(
-                splits["train"],
-                {"valid": splits["valid"], "test": splits["test"]},
-                h,
-            )
         for model, split_preds in candidates.items():
             for split_name, pred in split_preds.items():
                 all_rows.extend(evaluate(pred, splits[split_name], split_name, model))
-        LOGGER.info(f"h={h}: done ({len(candidates)} models)")
+        LOGGER.info(f"h={h}: statistical baselines done")
+        
+    # 2. Evaluate ML Models across all Horizons
+    for model_name, ModelClass in MODELS.items():
+        LOGGER.info(f"Training and evaluating {model_name}...")
+        model = ModelClass()
+        model.fit(splits["train"], list(HORIZONS))
+        preds_dict = model.predict({"valid": splits["valid"], "test": splits["test"]})
+        
+        for split_name, h_preds in preds_dict.items():
+            for pred_h, pred_df in h_preds.items():
+                all_rows.extend(evaluate(pred_df, splits[split_name], split_name, model_name))
+        LOGGER.info(f"{model_name}: done")
+        
     metrics = pl.DataFrame(all_rows).sort(["split", "h", "model", "scope"])
     out_path = DATA / "baseline_metrics.csv"
     metrics.write_csv(out_path)

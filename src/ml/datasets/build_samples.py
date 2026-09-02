@@ -20,7 +20,7 @@ from ml.features import (
 )
 
 LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
-REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
+REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 
 
 def _setup_logging() -> None:
@@ -117,9 +117,13 @@ def main() -> None:
         for h in horizons:
             col_name = f"y_step_h{h}"
             mean_col_name = f"y_mean_h{h}"
+            is_target_valid = pl.col("is_valid_target_date").shift(-h)
+            
             target_exprs.extend([
-                pl.col("log_value").shift(-h).alias(col_name),
-                pl.col("target_value").shift(-1).rolling_mean(window_size=h).shift(-(h-1)).log().alias(mean_col_name)
+                pl.when(is_target_valid).then(pl.col("log_value").shift(-h)).otherwise(None).alias(col_name),
+                pl.when(is_target_valid).then(
+                    pl.col("target_value").shift(-1).rolling_mean(window_size=h).shift(-(h-1)).log()
+                ).otherwise(None).alias(mean_col_name)
             ])
             target_cols.extend([col_name, mean_col_name])
             
@@ -153,7 +157,9 @@ def main() -> None:
         
         # Clean up: Only now do we drop days that weren't originally published
         df_target = df_target.filter(pl.col("is_valid_target_date")).drop("is_valid_target_date")
-        df_target = df_target.drop_nulls(subset=target_cols)
+        
+        # We don't drop null targets entirely because some horizons might be valid while others are not
+        # e.g., t+1 is weekend (null target), but t+7 is a weekday.
         
         all_samples.append(df_target)
         
