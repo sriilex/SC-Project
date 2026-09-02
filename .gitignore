@@ -39,3 +39,5 @@ dist/
 venv
 env
 ENV
+
+.safetensor
