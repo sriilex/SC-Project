@@ -1,0 +1,148 @@
+{
+  "h30": [
+    {
+      "feature": "weekofyear",
+      "shap_importance": 0.06518344581127167
+    },
+    {
+      "feature": "MACRO_SP500",
+      "shap_importance": 0.04433638975024223
+    },
+    {
+      "feature": "lag_1",
+      "shap_importance": 0.04018527269363403
+    },
+    {
+      "feature": "MACRO_DXY",
+      "shap_importance": 0.038420408964157104
+    },
+    {
+      "feature": "target_class",
+      "shap_importance": 0.03199164196848869
+    },
+    {
+      "feature": "ret_30",
+      "shap_importance": 0.029665492475032806
+    },
+    {
+      "feature": "rolling_mean_90",
+      "shap_importance": 0.021982861682772636
+    },
+    {
+      "feature": "lag_2",
+      "shap_importance": 0.01655447669327259
+    },
+    {
+      "feature": "cross_BSI_INDEX_ret_1",
+      "shap_importance": 0.01412267331033945
+    },
+    {
+      "feature": "cross_BHSI_INDEX_ret_1",
+      "shap_importance": 0.013159669935703278
+    },
+    {
+      "feature": "lag_10",
+      "shap_importance": 0.013113884255290031
+    },
+    {
+      "feature": "cross_BDI_log_level",
+      "shap_importance": 0.01201446820050478
+    },
+    {
+      "feature": "rolling_mean_30",
+      "shap_importance": 0.011616906151175499
+    },
+    {
+      "feature": "lag_63",
+      "shap_importance": 0.011090448126196861
+    },
+    {
+      "feature": "rolling_std_90",
+      "shap_importance": 0.011068138293921947
+    },
+    {
+      "feature": "is_cyclone_season",
+      "shap_importance": 0.010765936225652695
+    },
+    {
+      "feature": "ret_7",
+      "shap_importance": 0.010403265245258808
+    },
+    {
+      "feature": "is_monsoon",
+      "shap_importance": 0.010099023580551147
+    },
+    {
+      "feature": "month",
+      "shap_importance": 0.008513277396559715
+    },
+    {
+      "feature": "lag_3",
+      "shap_importance": 0.007873971946537495
+    },
+    {
+      "feature": "lag_21",
+      "shap_importance": 0.007039396092295647
+    },
+    {
+      "feature": "indian_fiscal_quarter",
+      "shap_importance": 0.006266487762331963
+    },
+    {
+      "feature": "rolling_std_30",
+      "shap_importance": 0.006104025989770889
+    },
+    {
+      "feature": "is_cny_window",
+      "shap_importance": 0.005140293855220079
+    },
+    {
+      "feature": "ret_1",
+      "shap_importance": 0.004662347491830587
+    },
+    {
+      "feature": "rolling_zscore_90",
+      "shap_importance": 0.004397786688059568
+    },
+    {
+      "feature": "cross_BPI_INDEX_ret_1",
+      "shap_importance": 0.003625590121373534
+    },
+    {
+      "feature": "cross_BC_INDEX_ret_1",
+      "shap_importance": 0.003319104667752981
+    },
+    {
+      "feature": "rolling_zscore_30",
+      "shap_importance": 0.0027412651106715202
+    },
+    {
+      "feature": "lag_5",
+      "shap_importance": 0.0020929353777319193
+    },
+    {
+      "feature": "congestion_origin_calls",
+      "shap_importance": 0.0012124204076826572
+    },
+    {
+      "feature": "congestion_dest_calls",
+      "shap_importance": 0.001003479352220893
+    },
+    {
+      "feature": "congestion_dest_imports_log1p",
+      "shap_importance": 0.0009452595259062946
+    },
+    {
+      "feature": "congestion_origin_exports_log1p",
+      "shap_importance": 0.0006446062470786273
+    },
+    {
+      "feature": "cross_BDI_ret_1",
+      "shap_importance": 0.00032378770993091166
+    },
+    {
+      "feature": "dayofweek",
+      "shap_importance": 1.8455613826517947e-05
+    }
+  ]
+}

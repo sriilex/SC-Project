@@ -105,11 +105,14 @@ def build_weather_events():
     print(json.dumps(weather_events, indent=2))
     
     # Save to a file in src/data
-    import os
-    os.makedirs("../data", exist_ok=True)
-    with open("../data/weather_events.json", "w") as f:
+    from pathlib import Path
+    out_dir = Path(__file__).resolve().parents[2] / "src" / "data"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "weather_events.json"
+    
+    with open(out_path, "w") as f:
         json.dump(weather_events, f, indent=2)
-    print("\nSaved to src/data/weather_events.json")
+    print(f"\nSaved to {out_path}")
 
 if __name__ == "__main__":
     build_weather_events()

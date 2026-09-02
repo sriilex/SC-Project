@@ -2,7 +2,7 @@ import yfinance as yf
 import polars as pl
 import pathlib
 
-def download_and_save():
+def download_and_save() -> None:
     print("Downloading S&P 500 data...")
     # Download S&P 500
     sp500_df = yf.download('^GSPC', start='2005-01-01')
@@ -10,11 +10,10 @@ def download_and_save():
     # yf.download returns a pandas DataFrame with MultiIndex columns in recent versions
     # We will reset index to get Date, and then convert to Polars
     sp500_pandas = sp500_df.reset_index()
+    
     # Flatten multi-index columns if they exist
-    if isinstance(sp500_pandas.columns, filter):
-        pass # Handle multi-index below if needed, though simple download usually single
     if hasattr(sp500_pandas.columns, "levels"):
-        sp500_pandas.columns = ['_'.join(col).strip('_') for col in sp500_pandas.columns.values]
+        sp500_pandas.columns = ['_'.join(str(c) for c in col).strip('_') if isinstance(col, tuple) else str(col) for col in sp500_pandas.columns.values]
     
     sp500_pl = pl.from_pandas(sp500_pandas)
     
@@ -24,11 +23,12 @@ def download_and_save():
     dxy_pandas = dxy_df.reset_index()
     
     if hasattr(dxy_pandas.columns, "levels"):
-        dxy_pandas.columns = ['_'.join(col).strip('_') for col in dxy_pandas.columns.values]
+        dxy_pandas.columns = ['_'.join(str(c) for c in col).strip('_') if isinstance(col, tuple) else str(col) for col in dxy_pandas.columns.values]
     
     dxy_pl = pl.from_pandas(dxy_pandas)
     
-    raw_data_dir = pathlib.Path("raw_data")
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    raw_data_dir = repo_root / "raw_data"
     raw_data_dir.mkdir(parents=True, exist_ok=True)
     
     sp500_path = raw_data_dir / "sp500_daily.parquet"

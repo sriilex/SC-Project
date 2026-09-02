@@ -56,6 +56,22 @@ def main() -> None:
         on="series_id"
     ).sort("date")
     
+    LOGGER.info("Creating continuous calendar grid and forward-filling missing values")
+    min_date = master_wide["date"].min()
+    max_date = master_wide["date"].max()
+    
+    date_grid = pl.DataFrame({"date": pl.date_range(min_date, max_date, "1d", eager=True)})
+    
+    # Keep track of which days had valid targets before we forward-fill
+    valid_flags = [pl.col(c).is_not_null().alias(f"{c}_is_valid") for c in master_wide.columns if c != "date"]
+    valid_dates = master_wide.select([pl.col("date")] + valid_flags)
+    
+    master_wide = date_grid.join(master_wide, on="date", how="left")
+    valid_dates = date_grid.join(valid_dates, on="date", how="left").fill_null(False)
+    
+    # Impute missing values by carrying the last known observation forward
+    master_wide = master_wide.fill_null(strategy="forward")
+    
     LOGGER.info("Adding calendar features")
     cny_dates = config["calendar"]["cny_dates"]
     master_wide = add_calendar_features(master_wide, cny_dates)
@@ -74,7 +90,7 @@ def main() -> None:
     returns = config["features"]["returns"]
     bdi_col = config["features"]["bdi_col"]
     
-    all_samples = []
+    all_samples: list[pl.DataFrame] = []
     
     for target_col, class_name in target_classes.items():
         if target_col not in master_wide.columns:
@@ -83,18 +99,19 @@ def main() -> None:
             
         LOGGER.info(f"Processing target: {class_name} ({target_col})")
         
+        # Select target on the continuous grid. Do NOT drop nulls yet!
         df_target = master_wide.select(
             "date", 
             pl.lit(class_name).alias("target_class"),
-            pl.col(target_col).alias("target_value")
-        ).drop_nulls(subset=["target_value"])
+            pl.col(target_col).alias("target_value"),
+            valid_dates.get_column(f"{target_col}_is_valid").alias("is_valid_target_date")
+        )
         
         df_target = df_target.with_columns(
             pl.col("target_value").log().alias("log_value")
-        )
+        ).sort("date")
         
-        df_target = df_target.sort("date")
-        
+        # Calculate horizons on the continuous grid (so h=7 is exactly 7 calendar days)
         target_exprs = []
         target_cols = []
         for h in horizons:
@@ -107,8 +124,8 @@ def main() -> None:
             target_cols.extend([col_name, mean_col_name])
             
         df_target = df_target.with_columns(target_exprs)
-        df_target = df_target.drop_nulls(subset=target_cols)
         
+        # Compute lags, rolling, and returns on the continuous grid
         lags_feat = LagsFeature(lags)
         df_target = lags_feat.transform(df_target)
         
@@ -127,14 +144,16 @@ def main() -> None:
         cols_to_join.extend(congestion_feat.feature_names_out())
         cols_to_join.extend(cross_feat.feature_names_out())
         
-        # Add the new macroeconomic features from paper 1
         for macro_feat in ["MACRO_SP500", "MACRO_DXY"]:
             if macro_feat in master_wide.columns:
                 cols_to_join.append(macro_feat)
         
         join_df = wide_with_cross.select(cols_to_join)
-        
         df_target = df_target.join(join_df, on="date", how="left")
+        
+        # Clean up: Only now do we drop days that weren't originally published
+        df_target = df_target.filter(pl.col("is_valid_target_date")).drop("is_valid_target_date")
+        df_target = df_target.drop_nulls(subset=target_cols)
         
         all_samples.append(df_target)
         
