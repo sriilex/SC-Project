@@ -66,13 +66,13 @@ The sign pattern is deliberate. When recent returns are negative, the model is e
 
 ### Defuzzification
 
-The output uses Sugeno weighted average. For firing strengths `s_i` and consequents `c_i`:
+The output uses Sugeno weighted average. For firing strengths $s_i$ and consequents $c_i$:
 
-```
-shift = sum(s_i * c_i) / sum(s_i)
-```
+$$
+\text{shift} = \frac{\sum_i s_i\, c_i}{\sum_i s_i}
+$$
 
-If the total firing strength is below `1e-9`, the shift is 0. This handles the case where the inputs fall outside all membership functions. The result is a single scalar per class, and the same scalar is added to P10, P50, and P90.
+If the total firing strength $\sum_i s_i$ is below $10^{-9}$, the shift is 0. This handles the case where the inputs fall outside all membership functions. The result is a single scalar per class, and the same scalar is added to P10, P50, and P90.
 
 ![Defuzzified shift surface](figures/fuzzy_rule_surface.png)
 
@@ -134,38 +134,41 @@ The metrics are written to `src/data/baseline_metrics.csv` with pinball loss per
 
 ### Evaluation metric: pinball loss
 
-Each quantile is scored on its own with the pinball loss. For target `y`,
-prediction `p`, and quantile level `q`:
+Each quantile is scored on its own with the pinball loss. For target $y$,
+prediction $p$, and quantile level $q$:
 
-```
-L_q(y, p) = q * (y - p)        if y >= p
-L_q(y, p) = (1 - q) * (p - y)  if y < p
-```
+$$
+L_q(y, p) =
+\begin{cases}
+q\,(y - p) & y \ge p \\[4pt]
+(1 - q)\,(p - y) & y < p
+\end{cases}
+$$
 
 Written in one line:
 
-```
-L_q(y, p) = max(q * (y - p), (q - 1) * (y - p))
-```
+$$
+L_q(y, p) = \max\bigl(q\,(y - p),\; (q - 1)\,(y - p)\bigr)
+$$
 
 The loss is an asymmetric absolute error. When the actual value is above the
-prediction, the error is weighted by `q`. When it is below, the error is
-weighted by `1 - q`. A high quantile such as P90 is therefore punished more for
+prediction, the error is weighted by $q$. When it is below, the error is
+weighted by $1 - q$. A high quantile such as P90 is therefore punished more for
 under-predicting than for over-predicting, which pushes it toward the upper
 tail of the distribution.
 
 Two properties are useful when reading the results table:
 
-1. At `q = 0.5` the two weights are equal and the loss becomes
-   `0.5 * |y - p|`. The median MAE reported by the harness is exactly twice the
+1. At $q = 0.5$ the two weights are equal and the loss becomes
+   $\tfrac{1}{2}|y - p|$. The median MAE reported by the harness is exactly twice the
    `pinball_0.5` value for this reason.
 2. Minimizing the expected pinball loss is equivalent to predicting the true
-   `q`-th quantile. A model that outputs the real P10, P50, and P90 has the
+   $q$-th quantile. A model that outputs the real P10, P50, and P90 has the
    lowest achievable average pinball loss for those three levels.
 
 The three losses are averaged over rows for each level, so lower is better. As
 a coverage check, a well-calibrated model should satisfy
-`share(y < p_0.1) ~= 0.10` and `share(y < p_0.9) ~= 0.90`.
+$\Pr(y < p_{0.1}) \approx 0.10$ and $\Pr(y < p_{0.9}) \approx 0.90$.
 
 ## Results and Limitations
 
