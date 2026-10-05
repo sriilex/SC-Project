@@ -10,9 +10,11 @@ from typing import Any, Final
 import polars as pl
 
 from ml.features import (
+    MACRO_SERIES_STEMS,
     CongestionFeature,
     CrossSeriesFeature,
     LagsFeature,
+    MacroFeature,
     ReturnsFeature,
     RollingFeature,
     add_calendar_features,
@@ -82,6 +84,27 @@ def main() -> None:
         dest_ports=config["features"]["ports"]["dest"]
     )
     master_wide = congestion_feat.transform(master_wide)
+
+    # Macro / commodity features (Brent, iron ore, coal, USD/INR, US IP).
+    # macro_long.parquet carries real World Bank Pink Sheet / FRED series and is
+    # joined as-of (backward) so each row only sees values knowable as of its date.
+    macro_features: list[MacroFeature] = []
+    macro_path = REPO_ROOT / "src" / "data" / "macro_long.parquet"
+    if macro_path.exists():
+        LOGGER.info("Adding macro/commodity features")
+        macro_long = pl.read_parquet(macro_path)
+        loaded_series = set(macro_long["series_id"].unique().to_list())
+        for series_id in MACRO_SERIES_STEMS:
+            if series_id in loaded_series:
+                macro_features.append(MacroFeature(macro_long, series_id))
+        for macro_feat in macro_features:
+            master_wide = macro_feat.transform(master_wide)
+        LOGGER.info(
+            f"Added {sum(len(m.feature_names_out()) for m in macro_features)} "
+            f"macro features from {len(macro_features)} series"
+        )
+    else:
+        LOGGER.warning(f"Macro series file not found at {macro_path}; skipping macro features")
     
     target_classes = config["targets"]["classes"]
     horizons = config["targets"]["horizons"]["days"]
@@ -151,6 +174,9 @@ def main() -> None:
         for macro_feat in ["MACRO_SP500", "MACRO_DXY"]:
             if macro_feat in master_wide.columns:
                 cols_to_join.append(macro_feat)
+
+        for mf in macro_features:
+            cols_to_join.extend(mf.feature_names_out())
         
         join_df = wide_with_cross.select(cols_to_join)
         df_target = df_target.join(join_df, on="date", how="left")
@@ -216,6 +242,8 @@ def main() -> None:
     feat_cols.extend(ReturnsFeature(returns).feature_names_out())
     feat_cols.extend(calendar_feature_names())
     feat_cols.extend(congestion_feat.feature_names_out())
+    for mf in macro_features:
+        feat_cols.extend(mf.feature_names_out())
     
     feat_cols.extend(["cross_BDI_log_level", "cross_BDI_ret_1"])
     for cls in target_classes.keys():

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Dry bulk charter forecasting pipeline (SIH 2026)"
 requires-python = ">=3.12"
 dependencies = [
+    "lightgbm>=4.7.0",
     "ortools>=9.15.6755",
     "polars>=1.0",
     "pydantic>=2.13.4",
@@ -22,6 +23,7 @@ packages = ["src/ml", "src/opt", "src/fetchers", "src/data_prep"]
 
 [dependency-groups]
 dev = [
+    "matplotlib>=3.11.2",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.16.4",

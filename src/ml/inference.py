@@ -9,6 +9,7 @@ import polars as pl
 import xgboost as xgb
 
 from ml.baselines import CLASS_CODES, QUANTILES
+from ml.fuzzy_calibration import calibrate as fuzzy_calibrate
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 MODELS_DIR: Final[Path] = REPO_ROOT / "src" / "data" / "models"
@@ -36,10 +37,17 @@ class FreightPredictor:
             
         self.feature_types = ["c" if n == "target_class" else "q" for n in self.feature_names]
 
-    def predict(self, df: pl.DataFrame) -> pl.DataFrame:
+    def predict(self, df: pl.DataFrame, history_df: pl.DataFrame | None = None) -> pl.DataFrame:
         """
         Predict log returns and add back to `log_value` to get absolute predictions.
         df must contain `target_class`, `date`, `log_value`, and all required features.
+
+        Parameters
+        ----------
+        df:         Feature DataFrame for the period to forecast.
+        history_df: Optional reference split (train/validation) used by the
+                    Sugeno FIS to estimate recent bias and volatility. When
+                    None, fuzzy calibration is skipped.
         """
         # Ensure target_class is properly encoded to integers
         if df["target_class"].dtype == pl.String:
@@ -79,4 +87,9 @@ class FreightPredictor:
             p_q = log_val + preds[:, i]
             exprs.append(pl.lit(p_q).alias(f"p_{q}"))
             
-        return df.select(*exprs)
+        raw_pred = df.select(*exprs)
+
+        # Apply Sugeno FIS calibration when history is provided
+        if history_df is not None:
+            return fuzzy_calibrate(raw_pred, history_df, self.h)
+        return raw_pred

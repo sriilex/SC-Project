@@ -5,6 +5,7 @@ import math
 import random
 from typing import Final
 
+import numpy as np
 import polars as pl
 import torch
 from torch import nn
@@ -23,6 +24,7 @@ CLASS_CODES: Final[dict[str, int]] = {c: i for i, c in enumerate(CLASSES)}
 
 def set_seed(seed: int = 42) -> None:
     random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
 
 

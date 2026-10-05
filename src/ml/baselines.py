@@ -11,10 +11,13 @@ Run with `uv run baselines` from the repository root.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Final
 
 import polars as pl
+
+from ml.fuzzy_calibration import calibrate as fuzzy_calibrate
 
 LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 
@@ -176,18 +179,53 @@ def evaluate(
     return rows
 
 
+def _history_for(
+    split_name: str, splits: dict[str, pl.DataFrame]
+) -> pl.DataFrame:
+    """Most-recent data known *before* ``split_name`` for FIS calibration.
+
+    The Sugeno FIS must never see the future: valid is calibrated against
+    train, and test against train+valid (everything published before it).
+    """
+    if split_name == "valid":
+        return splits["train"]
+    return pl.concat([splits["train"], splits["valid"]], how="diagonal")
+
+
+def _selected_models() -> set[str] | None:
+    """Optional model filter from ``BASELINES_MODELS`` (comma-separated).
+
+    ``None`` means run every model. Example: ``BASELINES_MODELS=lstm uv run
+    baselines`` runs only the LSTM and its fuzzy-calibrated variant.
+    """
+    raw = os.environ.get("BASELINES_MODELS", "").strip()
+    if not raw:
+        return None
+    return {name.strip() for name in raw.split(",") if name.strip()}
+
+
 def main() -> None:
     """Run all baselines, evaluate on valid/test, write metrics csv."""
     from ml.models import MODELS
 
     _setup_logging()
+    selected = _selected_models()
     splits = {name: load_split(name) for name in ("train", "valid", "test")}
     all_rows: list[dict[str, object]] = []
     
     # 1. Evaluate Statistical / Simple Baselines per Horizon
     for h in HORIZONS:
-        candidates: dict[str, dict[str, pl.DataFrame]] = {
-        }
+        candidates: dict[str, dict[str, pl.DataFrame]] = {}
+        if selected is None or "rw" in selected:
+            candidates["rw"] = {
+                s: predict_rw(splits[s], h, fit_rw_sigmas(splits["train"], h))
+                for s in ("valid", "test")
+            }
+        if selected is None or "ar1" in selected:
+            candidates["ar1"] = {
+                s: predict_ar1(splits[s], h, fit_ar1(splits["train"], h))
+                for s in ("valid", "test")
+            }
         for model, split_preds in candidates.items():
             for split_name, pred in split_preds.items():
                 all_rows.extend(evaluate(pred, splits[split_name], split_name, model))
@@ -195,14 +233,23 @@ def main() -> None:
         
     # 2. Evaluate ML Models across all Horizons
     for model_name, ModelClass in MODELS.items():
+        if selected is not None and model_name not in selected:
+            continue
         LOGGER.info(f"Training and evaluating {model_name}...")
         model = ModelClass()
         model.fit(splits["train"], list(HORIZONS))
         preds_dict = model.predict({"valid": splits["valid"], "test": splits["test"]})
         
         for split_name, h_preds in preds_dict.items():
+            history = _history_for(split_name, splits)
             for pred_h, pred_df in h_preds.items():
                 all_rows.extend(evaluate(pred_df, splits[split_name], split_name, model_name))
+                # Before/after row: LSTM re-calibrated by the Sugeno FIS.
+                if model_name == "lstm":
+                    calibrated = fuzzy_calibrate(pred_df, history, pred_h)
+                    all_rows.extend(
+                        evaluate(calibrated, splits[split_name], split_name, "lstm_fuzzy")
+                    )
         LOGGER.info(f"{model_name}: done")
         
     metrics = pl.DataFrame(all_rows).sort(["split", "h", "model", "scope"])
