@@ -40,4 +40,13 @@ venv
 env
 ENV
 
-.safetensor
+# Model weights and generated training artifacts (never commit these)
+*.safetensors
+*.pt
+src/ml/weights/
+src/data/preds/
+src/data/checkpoints/
+src/data/sample_backup/
+src/data/sample_lag7/
+src/data/logs/
+src/data/weights/

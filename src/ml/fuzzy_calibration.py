@@ -1,235 +1,525 @@
-"""Sugeno-style fuzzy inference system (FIS) for forecast calibration.
+"""Sugeno-style fuzzy calibration for the frozen quantile LSTM.
 
-Inputs
-------
-  mean_pct_error  -- recent percentage bias of the model (negative = under-pred).
-  recent_volatility -- rolling standard deviation of log-returns (uncertainty proxy).
+Design (Tasks F):
 
-Output
-------
-  shift_factor    -- additive correction applied symmetrically to all three
-                     quantile predictions (P10, P50, P90) in log space.
+* Two small differentiable Sugeno systems. Gaussian membership functions with
+  learnable centres and widths, product t-norm, weighted-average
+  defuzzification, a 3x3 rule base, constant or linear consequents.
+    - ``FIS_width``: (cov_gap, vol) -> log width multiplier ``m`` (tanh-bounded).
+    - ``FIS_loc``  : (bias_z, vol) -> location shift ``s``.
+* Inputs are recomputed **per forecast date** from information available then.
+  Forecast residuals are *matured*: a forecast issued at ``t`` for horizon ``h``
+  matures at ``t + h``, so the rolling window for a forecast at ``t`` may only
+  contain forecasts issued at or before ``t - h``.
+    - ``cov_gap`` = P(y < P10) + P(y > P90) - 0.20 over the last N matured rows
+      (positive = intervals too narrow). Only used at h=1 and h=7.
+    - ``vol``     = trailing std of daily log-value changes, z-scored against its
+      expanding history.
+    - ``bias_z``  = mean(y - P50) / std(y - P50) over the last N matured rows.
+* The fuzzy parameters are trained (base model frozen) by minimising the summed
+  pinball loss over {0.1, 0.5, 0.9}; consequents start at zero so the untrained
+  layer is the identity.
+* Inference (:func:`calibrate`) is numpy-only and reads a plain JSON parameter
+  dict. It never imports torch.
 
-Defuzzification is weighted-average (Sugeno style): each rule fires with a
-strength (min of its input MF degrees), and the output is the strength-weighted
-mean of the crisp rule consequents. No external fuzzy library is required.
+Application::
 
-Usage
------
-    from ml.fuzzy_calibration import calibrate
-    adjusted_df = calibrate(pred_df, history_df, h)
+    p50' = p50 + s
+    p10' = p50' - (p50 - p10) * exp(m)
+    p90' = p50' + (p90 - p50) * exp(m)
+
+so ordering is preserved by construction.
 """
 from __future__ import annotations
 
+import itertools
+import json
+import logging
+import math
+from pathlib import Path
 from typing import Final
 
+import numpy as np
 import polars as pl
 
-# ---------------------------------------------------------------------------
-# Membership functions (plain Python, no library required)
-# ---------------------------------------------------------------------------
+LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 
-def _trimf(x: float, a: float, b: float, c: float) -> float:
-    """Triangle MF: rises linearly from a to b, falls linearly from b to c."""
-    if x <= a or x >= c:
-        return 0.0
-    if x <= b:
-        return (x - a) / (b - a) if b != a else 1.0
-    return (c - x) / (c - b) if c != b else 1.0
+REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
+FIG_DIR: Final[Path] = REPO_ROOT / "docs" / "figures"
+PARAM_DIR: Final[Path] = REPO_ROOT / "src" / "data" / "fuzzy_params"
 
+#: Bound on the log width multiplier: exp(m) in [exp(-M), exp(M)].
+M_SCALE: Final[float] = 0.7
+#: Bound on the location shift in log-return space.
+S_SCALE: Final[float] = 0.15
+#: Rolling window length (in matured forecasts) for cov_gap / bias_z.
+N_MATURED: Final[int] = 60
+#: Minimum matured rows before cov_gap / bias_z are considered usable.
+MIN_MATURED: Final[int] = 5
+#: Trailing window (days) for the volatility input.
+VOL_WINDOW: Final[int] = 14
 
-def _trapmf(x: float, a: float, b: float, c: float, d: float) -> float:
-    """Trapezoid MF: flat-top from b to c, slopes on [a,b] and [c,d]."""
-    if x <= a or x >= d:
-        return 0.0
-    if x <= b:
-        return (x - a) / (b - a) if b != a else 1.0
-    if x <= c:
-        return 1.0
-    return (d - x) / (d - c) if d != c else 1.0
+FuzzyParams = dict[str, object]
 
 
 # ---------------------------------------------------------------------------
-# Linguistic variable definitions
-# ---------------------------------------------------------------------------
-# mean_pct_error: negative = model under-predicts, positive = over-predicts
-#   range roughly [-0.15, +0.15] for freight rates in log space
-# recent_volatility: rolling std of log returns over last 14 days
-#   range roughly [0.0, 0.12]
-
-def _mpe_negative(e: float) -> float:
-    """Bias is significantly negative (model under-predicts)."""
-    return _trapmf(e, -0.20, -0.15, -0.06, -0.02)
-
-
-def _mpe_neutral(e: float) -> float:
-    """Bias is near zero."""
-    return _trimf(e, -0.06, 0.0, 0.06)
-
-
-def _mpe_positive(e: float) -> float:
-    """Bias is significantly positive (model over-predicts)."""
-    return _trapmf(e, 0.02, 0.06, 0.15, 0.20)
-
-
-def _vol_low(v: float) -> float:
-    """Market is calm."""
-    return _trapmf(v, 0.0, 0.0, 0.02, 0.05)
-
-
-def _vol_medium(v: float) -> float:
-    """Normal volatility."""
-    return _trimf(v, 0.02, 0.05, 0.09)
-
-
-def _vol_high(v: float) -> float:
-    """High uncertainty."""
-    return _trapmf(v, 0.06, 0.09, 0.20, 0.20)
-
-
-# ---------------------------------------------------------------------------
-# Sugeno FIS: rules & defuzzification
-# ---------------------------------------------------------------------------
-# Consequents are crisp scalars (log-space additive shift to P50/P10/P90).
-# Positive shift => nudge forecasts up; negative => nudge down.
-
-# Rule consequent singletons (additive log-space corrections)
-_RULES: Final[list[tuple[float, float, float]]] = [
-    # (mpe_strength,  vol_strength,  consequent)  -- filled dynamically per call
-    # Rule 1: negative bias + low vol  => push up moderately
-    # Rule 2: negative bias + high vol => push up aggressively
-    # Rule 3: neutral bias + any vol   => no shift
-    # Rule 4: positive bias + low vol  => push down moderately
-    # Rule 5: positive bias + high vol => push down aggressively
-    # Rule 6: any bias + very high vol => small push in bias direction (dampened)
-]  # (populated in sugeno_shift below for clarity)
-
-
-def sugeno_shift(mean_pct_error: float, recent_volatility: float) -> float:
-    """Return the Sugeno defuzzified shift (scalar, log-space additive)."""
-    e = float(mean_pct_error)
-    v = float(recent_volatility)
-
-    # Clamp inputs to defined universe
-    e = max(-0.20, min(0.20, e))
-    v = max(0.00, min(0.20, v))
-
-    # Fire degrees (min-operator conjunction)
-    rules: list[tuple[float, float]] = [
-        # (firing_strength, consequent)
-        (min(_mpe_negative(e), _vol_low(v)),    +0.030),   # R1
-        (min(_mpe_negative(e), _vol_medium(v)), +0.050),   # R2
-        (min(_mpe_negative(e), _vol_high(v)),   +0.080),   # R3
-        (min(_mpe_neutral(e),  _vol_low(v)),    +0.000),   # R4
-        (min(_mpe_neutral(e),  _vol_medium(v)), +0.000),   # R5
-        (min(_mpe_neutral(e),  _vol_high(v)),   +0.010),   # R6 (vol squeeze)
-        (min(_mpe_positive(e), _vol_low(v)),    -0.030),   # R7
-        (min(_mpe_positive(e), _vol_medium(v)), -0.050),   # R8
-        (min(_mpe_positive(e), _vol_high(v)),   -0.080),   # R9
-    ]
-
-    total_strength = sum(s for s, _ in rules)
-    if total_strength < 1e-9:
-        return 0.0
-    return sum(s * c for s, c in rules) / total_strength
-
-
-# ---------------------------------------------------------------------------
-# Public API
+# Inputs
 # ---------------------------------------------------------------------------
 
-def _compute_inputs(
-    pred_df: pl.DataFrame,
-    history_df: pl.DataFrame,
+def compute_fuzzy_inputs(
+    frame: pl.DataFrame,
     h: int,
-    lookback: int = 60,
-) -> tuple[float, float]:
-    """Derive mean_pct_error and recent_volatility from history.
+    n_matured: int = N_MATURED,
+    vol_window: int = VOL_WINDOW,
+    min_matured: int = MIN_MATURED,
+) -> pl.DataFrame:
+    """Per-row causal fuzzy inputs: ``vol_z``, ``cov_gap``, ``bias_z``.
 
-    Parameters
-    ----------
-    pred_df:     Raw quantile predictions (columns: date, target_class,
-                 h, p_0.1, p_0.5, p_0.9).
-    history_df:  Training-or-validation split with true targets
-                 (columns: date, target_class, log_value, y_step_h{h}).
-    h:           Forecast horizon.
-    lookback:    Number of most-recent rows used to estimate bias/volatility.
+    ``frame`` must contain ``date, target_class, log_value, p_0.1, p_0.5,
+    p_0.9, y``. ``y`` is the realised h-step level for the issue date on that
+    row, i.e. the outcome that matures ``h`` days later. A row at date ``t``
+    only sees rows with ``date <= t - h``.
     """
-    target_col = f"y_step_h{h}"
+    rows: list[dict[str, object]] = []
+    for cls_frame in frame.sort(["target_class", "date"]).partition_by("target_class", maintain_order=True):
+        cls = str(cls_frame["target_class"][0])
+        g = cls_frame.sort("date")
+        n = g.height
+        if n == 0:
+            continue
+        logv = g["log_value"].to_numpy().astype(float)
+        p10 = g["p_0.1"].to_numpy().astype(float)
+        p50 = g["p_0.5"].to_numpy().astype(float)
+        p90 = g["p_0.9"].to_numpy().astype(float)
+        yv = g["y"].to_numpy().astype(float)
+        dates = g["date"].to_numpy().astype("datetime64[D]")
 
-    # --- Bias: compare past p_0.5 predictions vs realized log_value --------
-    if target_col in history_df.columns:
-        tail = (
-            history_df.drop_nulls([target_col, "log_value"])
-            .sort("date")
-            .tail(lookback)
-        )
-        if tail.height > 0:
-            # Proxy for model bias using RW as a stand-in if pred history is
-            # unavailable; real bias = mean(y_hat - y) / mean(|y|)
-            errs = tail[target_col] - tail["log_value"]
-            y_bar = tail["log_value"].abs().mean()
-            mean_pct_error = float(errs.mean()) / (float(y_bar) if y_bar else 1.0)
-        else:
-            mean_pct_error = 0.0
-    else:
-        mean_pct_error = 0.0
+        # Trailing volatility and its expanding z-score (stats from t' < t only).
+        d = np.diff(logv, prepend=np.nan)
+        vol = np.full(n, np.nan)
+        if n >= vol_window:
+            for i in range(vol_window - 1, n):
+                seg = d[i - vol_window + 1 : i + 1]
+                if np.sum(~np.isnan(seg)) >= max(3, vol_window // 2):
+                    vol[i] = np.nanstd(seg)
+        vol_z = np.zeros(n)
+        csum = csum2 = 0.0
+        cnt = 0
+        for i in range(n):
+            if cnt > 1:
+                mu = csum / cnt
+                var = max(csum2 / cnt - mu * mu, 0.0)
+                sd = math.sqrt(var)
+            else:
+                mu, sd = 0.0, 1.0
+            if not np.isnan(vol[i]):
+                vol_z[i] = (vol[i] - mu) / (sd + 1e-9)
+                csum += vol[i]
+                csum2 += vol[i] * vol[i]
+                cnt += 1
+        vol_z = np.nan_to_num(vol_z, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # --- Volatility: rolling std of 1-day log returns ----------------------
-    if "log_value" in history_df.columns and history_df.height > 1:
-        tail_vol = (
-            history_df.sort("date")
-            .tail(lookback + 1)
-            .select(pl.col("log_value").diff().drop_nulls())
-        )
-        recent_volatility = float(tail_vol["log_value"].std()) if tail_vol.height > 1 else 0.0
-    else:
-        recent_volatility = 0.0
+        below = np.where(np.isnan(yv), np.nan, (yv < p10).astype(float))
+        above = np.where(np.isnan(yv), np.nan, (yv > p90).astype(float))
+        resid = yv - p50
 
-    return mean_pct_error, recent_volatility
+        for i in range(n):
+            cutoff = dates[i] - np.timedelta64(h, "D")
+            j = int(np.searchsorted(dates, cutoff, side="right"))
+            lo = max(0, j - n_matured)
+            count = j - lo
+            cov_gap = 0.0
+            bias_z = 0.0
+            if count >= min_matured:
+                b = below[lo:j]
+                a = above[lo:j]
+                if not np.all(np.isnan(b)):
+                    cov_gap = float(np.nanmean(b) + np.nanmean(a) - 0.20)
+                r = resid[lo:j]
+                r = r[~np.isnan(r)]
+                if r.size > 1 and r.std() > 1e-9:
+                    bias_z = float(r.mean() / r.std())
+            rows.append({
+                "date": g["date"][i],
+                "target_class": cls,
+                "vol_z": float(vol_z[i]),
+                "cov_gap": cov_gap,
+                "bias_z": bias_z,
+                "n_matured": count,
+            })
+    return pl.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# numpy inference (no torch)
+# ---------------------------------------------------------------------------
+
+def _fis_numpy(spec: dict[str, object], x: np.ndarray) -> np.ndarray:
+    """Evaluate a Sugeno FIS stored in ``spec`` on ``x`` (n, n_inputs)."""
+    centers = np.asarray(spec["centers"], dtype=float)
+    widths = np.asarray(spec["widths"], dtype=float)
+    n_inputs = centers.shape[0]
+    n_mfs = centers.shape[1]
+    x = np.atleast_2d(x)
+    if x.shape[1] != n_inputs:
+        raise ValueError(f"expected {n_inputs} inputs, got {x.shape[1]}")
+    d = (x[:, :, None] - centers[None, :, :]) / (widths[None, :, :] + 1e-9)
+    mu = np.exp(-0.5 * d * d)  # (n, n_inputs, n_mfs)
+    rule_idx = list(itertools.product(range(n_mfs), repeat=n_inputs))
+    w = np.ones((x.shape[0], len(rule_idx)))
+    for j, idx in enumerate(rule_idx):
+        for i, mi in enumerate(idx):
+            w[:, j] *= mu[:, i, mi]
+    cons = np.asarray(spec["consequents"], dtype=float).reshape(-1)
+    f = np.tile(cons[None, :], (x.shape[0], 1))
+    lin = spec.get("linear_coefs")
+    if lin is not None:
+        lin = np.asarray(lin, dtype=float)  # (R, n_inputs)
+        f = f + (lin[None, :, :] * x[:, None, :]).sum(axis=2)
+    num = (w * f).sum(axis=1)
+    den = w.sum(axis=1) + 1e-12
+    out = num / den
+    scale = float(spec.get("output_scale", 1.0))
+    if spec.get("bounded", True):
+        out = scale * np.tanh(out)
+    return out
+
+
+def _adjust_numpy(base: np.ndarray, m: np.ndarray, s: np.ndarray) -> np.ndarray:
+    """Apply (m, s) to base columns [p10, p50, p90] (n, 3); numpy."""
+    p10, p50, p90 = base[:, 0], base[:, 1], base[:, 2]
+    p50_new = p50 + s
+    mult = np.exp(m)
+    p10_new = p50_new - (p50 - p10) * mult
+    p90_new = p50_new + (p90 - p50) * mult
+    out = np.stack([p10_new, p50_new, p90_new], axis=1)
+    # Numerical safety: enforce ordering.
+    out[:, 0] = np.minimum(out[:, 0], out[:, 1])
+    out[:, 2] = np.maximum(out[:, 2], out[:, 1])
+    return out
+
+
+def _norm_inputs(x: np.ndarray, spec: dict[str, object]) -> np.ndarray:
+    mean = np.asarray(spec["norm_mean"], dtype=float)
+    std = np.asarray(spec["norm_std"], dtype=float)
+    return (x - mean) / (std + 1e-9)
 
 
 def calibrate(
     pred_df: pl.DataFrame,
     history_df: pl.DataFrame,
     h: int,
-    lookback: int = 60,
+    params: FuzzyParams,
 ) -> pl.DataFrame:
-    """Apply Sugeno FIS calibration to raw P10/P50/P90 quantile forecasts.
+    """Apply the trained Sugeno FIS to raw quantiles. numpy-only.
 
-    Parameters
-    ----------
-    pred_df:     Raw forecast DataFrame with columns:
-                 date, target_class, h, p_0.1, p_0.5, p_0.9
-    history_df:  Reference data (train/validation split) used to estimate
-                 recent bias and volatility.  Must contain log_value and,
-                 if available, the target column y_step_h{h}.
-    h:           Forecast horizon (must match pred_df's ``h`` column values).
-    lookback:    How many trailing rows of history to use for input estimation.
-
-    Returns
-    -------
-    pl.DataFrame with the same schema as pred_df but with calibrated quantiles.
+    Same schema and row order as ``pred_df``. ``history_df`` must contain the
+    base quantiles and realised outcomes used to recompute causal inputs.
     """
-    # Compute per-class inputs and apply a per-class shift for precision,
-    # falling back to a pooled shift if a class has no history.
-    classes = pred_df["target_class"].unique().to_list()
-    shift_by_class: dict[str, float] = {}
-
-    for cls in classes:
-        cls_history = history_df.filter(pl.col("target_class") == cls)
-        if cls_history.is_empty():
-            cls_history = history_df  # fallback: pooled
-        mpe, vol = _compute_inputs(pred_df, cls_history, h, lookback)
-        shift_by_class[cls] = sugeno_shift(mpe, vol)
-
-    # Build a mapping Series for vectorised apply
-    shift_expr = pl.col("target_class").replace_strict(
-        shift_by_class, default=0.0
+    inputs = compute_fuzzy_inputs(history_df, h)
+    joined = pred_df.join(
+        inputs.select("date", "target_class", "vol_z", "cov_gap", "bias_z"),
+        on=["date", "target_class"],
+        how="left",
     )
+    n = joined.height
+    vol = np.nan_to_num(joined["vol_z"].to_numpy().astype(float))
+    cov = np.nan_to_num(joined["cov_gap"].to_numpy().astype(float))
+    bias = np.nan_to_num(joined["bias_z"].to_numpy().astype(float))
 
+    width_spec = params["width"]  # type: ignore[index]
+    loc_spec = params["loc"]  # type: ignore[index]
+    width_cols = list(width_spec["inputs"])  # type: ignore[index]
+    loc_cols = list(loc_spec["inputs"])  # type: ignore[index]
+
+    def _build(cols: list[str]) -> np.ndarray:
+        mapping = {"vol_z": vol, "cov_gap": cov, "bias_z": bias}
+        if not cols:
+            return np.zeros((n, 0))
+        return np.stack([mapping[c] for c in cols], axis=1)
+
+    xw = _build(width_cols)
+    xl = _build(loc_cols)
+    m = _fis_numpy(width_spec, _norm_inputs(xw, width_spec)) if width_cols else np.zeros(n)
+    s = _fis_numpy(loc_spec, _norm_inputs(xl, loc_spec)) if loc_cols else np.zeros(n)
+
+    base = np.stack([
+        joined["p_0.1"].to_numpy().astype(float),
+        joined["p_0.5"].to_numpy().astype(float),
+        joined["p_0.9"].to_numpy().astype(float),
+    ], axis=1)
+    adj = _adjust_numpy(base, m, s)
     return pred_df.with_columns(
-        (pl.col("p_0.1") + shift_expr).alias("p_0.1"),
-        (pl.col("p_0.5") + shift_expr).alias("p_0.5"),
-        (pl.col("p_0.9") + shift_expr).alias("p_0.9"),
+        pl.Series("p_0.1", adj[:, 0]),
+        pl.Series("p_0.5", adj[:, 1]),
+        pl.Series("p_0.9", adj[:, 2]),
     )
+
+
+# ---------------------------------------------------------------------------
+# torch training (base model frozen)
+# ---------------------------------------------------------------------------
+
+def _sugeno_torch(n_inputs: int, n_mfs: int, linear: bool, output_scale: float, bounded: bool):
+    import torch
+    from torch import nn
+    from torch.nn import functional as F
+
+    class SugenoFIS(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.n_inputs = n_inputs
+            self.n_mfs = n_mfs
+            self.linear = linear
+            self.output_scale = output_scale
+            self.bounded = bounded
+            centers = torch.linspace(-1.0, 1.0, n_mfs).repeat(n_inputs, 1)
+            self.centers = nn.Parameter(centers)
+            self.log_widths = nn.Parameter(torch.full((n_inputs, n_mfs), math.log(0.7)))
+            rule_idx = list(itertools.product(range(n_mfs), repeat=n_inputs))
+            self.register_buffer("rule_idx", torch.tensor(rule_idx, dtype=torch.long))
+            self.consequents = nn.Parameter(torch.zeros(len(rule_idx), 1))
+            if linear:
+                self.lin = nn.Parameter(torch.zeros(len(rule_idx), n_inputs, 1))
+            else:
+                self.lin = None
+
+        def forward(self, x):
+            widths = F.softplus(self.log_widths) + 1e-3
+            d = (x.unsqueeze(2) - self.centers.unsqueeze(0)) / widths.unsqueeze(0)
+            mu = torch.exp(-0.5 * d * d)
+            w = torch.ones(x.shape[0], self.rule_idx.shape[0], device=x.device)
+            for i in range(self.n_inputs):
+                idx = self.rule_idx[:, i]
+                w = w * mu[:, i, :].index_select(1, idx)
+            f = self.consequents.unsqueeze(0)
+            if self.lin is not None:
+                f = f + (self.lin.unsqueeze(0) * x.unsqueeze(1).unsqueeze(-1)).sum(dim=2)
+            num = (w.unsqueeze(-1) * f).sum(dim=1)
+            den = w.sum(dim=1, keepdim=True) + 1e-9
+            out = (num / den).squeeze(-1)
+            if self.bounded:
+                out = self.output_scale * torch.tanh(out)
+            return out
+
+    return SugenoFIS()
+
+
+def _spec_from_torch(fis, inputs: list[str], norm_mean: np.ndarray, norm_std: np.ndarray) -> dict[str, object]:
+    import torch.nn.functional as F
+
+    widths = (F.softplus(fis.log_widths) + 1e-3).detach().cpu().numpy()
+    linear = fis.linear
+    spec: dict[str, object] = {
+        "inputs": inputs,
+        "centers": fis.centers.detach().cpu().numpy().tolist(),
+        "widths": widths.tolist(),
+        "consequents": fis.consequents.detach().cpu().numpy().reshape(-1).tolist(),
+        "linear_coefs": None if not linear else fis.lin.detach().cpu().numpy().reshape(len(fis.rule_idx), -1).tolist(),
+        "output_scale": float(fis.output_scale),
+        "bounded": bool(fis.bounded),
+        "n_mfs": int(fis.n_mfs),
+        "norm_mean": np.asarray(norm_mean).tolist(),
+        "norm_std": np.asarray(norm_std).tolist(),
+    }
+    return spec
+
+
+def fit_fuzzy(
+    context_frame: pl.DataFrame,
+    train_frame: pl.DataFrame,
+    h: int,
+    use_width: bool = True,
+    use_loc: bool = True,
+    with_vol: bool = True,
+    linear: bool = False,
+    epochs: int = 600,
+    lr: float = 0.05,
+    seed: int = 0,
+) -> tuple[FuzzyParams, dict[str, object]]:
+    """Train the fuzzy parameters on ``train_frame`` (base quantiles frozen).
+
+    ``context_frame`` is the history+split frame (base quantiles and matured
+    outcomes) from which causal inputs are computed. ``train_frame`` selects
+    the rows to fit on. ``with_vol=False`` drops the volatility input from both
+    systems (ablation).
+    """
+    import torch
+
+    from ml.models.lstm import pinball_loss, set_seed
+
+    set_seed(seed)
+
+    inputs_all = compute_fuzzy_inputs(context_frame, h)
+    train = train_frame.join(
+        inputs_all.select("date", "target_class", "vol_z", "cov_gap", "bias_z"),
+        on=["date", "target_class"],
+        how="left",
+    ).drop_nulls(["y", "p_0.1", "p_0.5", "p_0.9", "log_value"])
+
+    n = train.height
+    if n == 0:
+        raise ValueError("no training rows for fuzzy calibration")
+
+    vol = np.nan_to_num(train["vol_z"].to_numpy().astype(float))
+    cov = np.nan_to_num(train["cov_gap"].to_numpy().astype(float))
+    bias = np.nan_to_num(train["bias_z"].to_numpy().astype(float))
+    mapping = {"vol_z": vol, "cov_gap": cov, "bias_z": bias}
+
+    width_cols = ([] if not use_width else (["cov_gap", "vol_z"] if with_vol else ["cov_gap"]))
+    # cov_gap is only usable at h=1 and h=7 (at h>=30 few forecasts mature
+    # inside the split), so the width system becomes volatility-only there.
+    if use_width and h >= 30:
+        width_cols = ["vol_z"]
+    loc_cols = ([] if not use_loc else (["bias_z", "vol_z"] if with_vol else ["bias_z"]))
+
+    base = np.stack([
+        train["p_0.1"].to_numpy().astype(float) - train["log_value"].to_numpy().astype(float),
+        train["p_0.5"].to_numpy().astype(float) - train["log_value"].to_numpy().astype(float),
+        train["p_0.9"].to_numpy().astype(float) - train["log_value"].to_numpy().astype(float),
+    ], axis=1)
+    y_ret = (train["y"].to_numpy().astype(float) - train["log_value"].to_numpy().astype(float))
+
+    def _norm(cols: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        x = np.stack([mapping[c] for c in cols], axis=1) if cols else np.zeros((n, 0))
+        mean = x.mean(axis=0) if x.size else np.zeros(0)
+        std = x.std(axis=0) if x.size else np.zeros(0)
+        std = np.where(std < 1e-9, 1.0, std)
+        return x, mean, std
+
+    xw, w_mean, w_std = _norm(width_cols)
+    xl, l_mean, l_std = _norm(loc_cols)
+
+    device = torch.device("cpu")
+    width_fis = _sugeno_torch(len(width_cols), 3, linear, M_SCALE, True).to(device) if width_cols else None
+    loc_fis = _sugeno_torch(len(loc_cols), 3, linear, S_SCALE, True).to(device) if loc_cols else None
+
+    params = []
+    if width_fis is not None:
+        params += list(width_fis.parameters())
+    if loc_fis is not None:
+        params += list(loc_fis.parameters())
+    if params:
+        opt = torch.optim.Adam(params, lr=lr)
+    else:
+        opt = None
+
+    tw = torch.tensor((xw - w_mean) / w_std, dtype=torch.float32) if width_cols else None
+    tl = torch.tensor((xl - l_mean) / l_std, dtype=torch.float32) if loc_cols else None
+    tbase = torch.tensor(base, dtype=torch.float32)
+    ty = torch.tensor(y_ret, dtype=torch.float32)
+
+    for _epoch in range(epochs):
+        if opt is not None:
+            opt.zero_grad()
+        m = width_fis(tw) if width_fis is not None else torch.zeros(n)
+        s = loc_fis(tl) if loc_fis is not None else torch.zeros(n)
+        p50 = tbase[:, 1] + s
+        mult = torch.exp(m)
+        p10 = p50 - (tbase[:, 1] - tbase[:, 0]) * mult
+        p90 = p50 + (tbase[:, 2] - tbase[:, 1]) * mult
+        pred = torch.stack([p10, p50, p90], dim=1)
+        loss = pinball_loss(pred, ty)
+        if opt is not None:
+            loss.backward()
+            opt.step()
+
+    width_spec = _spec_from_torch(width_fis, width_cols, w_mean, w_std) if width_fis is not None else {
+        "inputs": [], "centers": [], "widths": [], "consequents": [],
+        "linear_coefs": None, "output_scale": M_SCALE, "bounded": True, "n_mfs": 3,
+        "norm_mean": [], "norm_std": [],
+    }
+    loc_spec = _spec_from_torch(loc_fis, loc_cols, l_mean, l_std) if loc_fis is not None else {
+        "inputs": [], "centers": [], "widths": [], "consequents": [],
+        "linear_coefs": None, "output_scale": S_SCALE, "bounded": True, "n_mfs": 3,
+        "norm_mean": [], "norm_std": [],
+    }
+
+    n_matured = train.join(inputs_all.select("date", "target_class", "n_matured"), on=["date", "target_class"], how="left")
+    stats = {
+        "h": h,
+        "n_train": n,
+        "n_matured_median": float(n_matured["n_matured"].median()),
+        "n_matured_mean": float(n_matured["n_matured"].mean()),
+        "frac_rows_with_matured": float((n_matured["n_matured"] >= MIN_MATURED).mean()),
+        "final_train_pinball": float(loss.item()),
+        "width_inputs": width_cols,
+        "loc_inputs": loc_cols,
+    }
+    return {"h": h, "width": width_spec, "loc": loc_spec, "stats": stats}, stats
+
+
+def save_params(params: FuzzyParams, name: str) -> Path:
+    PARAM_DIR.mkdir(parents=True, exist_ok=True)
+    path = PARAM_DIR / f"{name}.json"
+    path.write_text(json.dumps(params, indent=2))
+    return path
+
+
+def load_params(name: str) -> FuzzyParams:
+    return json.loads((PARAM_DIR / f"{name}.json").read_text())
+
+
+def describe_params(params: FuzzyParams) -> str:
+    """Human-readable dump of membership functions and rule consequents."""
+    lines: list[str] = [f"FIS for h={params.get('h')}"]
+    for system in ("width", "loc"):
+        spec = params[system]  # type: ignore[index]
+        lines.append(f"\n[{system}] inputs={spec['inputs']} output_scale={spec['output_scale']}")
+        centers = np.asarray(spec["centers"], dtype=float)
+        widths = np.asarray(spec["widths"], dtype=float)
+        for i, name in enumerate(spec["inputs"]):  # type: ignore[union-attr]
+            lines.append(f"  {name}: " + " ".join(
+                f"MF{k}(c={centers[i, k]:+.3f}, w={widths[i, k]:.3f})" for k in range(centers.shape[1])
+            ))
+        cons = np.asarray(spec["consequents"], dtype=float)
+        lines.append(f"  consequents: {np.round(cons, 4).tolist()}")
+    return "\n".join(lines)
+
+
+def plot_fuzzy(params: FuzzyParams, name: str) -> list[Path]:
+    """Plot membership functions and the width surface to ``docs/figures``."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    FIG_DIR.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    for ax, system in zip(axes, ("width", "loc")):
+        spec = params[system]  # type: ignore[index]
+        centers = np.asarray(spec["centers"], dtype=float)
+        widths = np.asarray(spec["widths"], dtype=float)
+        for i, iname in enumerate(spec["inputs"]):  # type: ignore[union-attr]
+            grid = np.linspace(-3, 3, 200)
+            for k in range(centers.shape[1]):
+                mu = np.exp(-0.5 * ((grid - centers[i, k]) / (widths[i, k] + 1e-9)) ** 2)
+                ax.plot(grid, mu, label=f"{iname} MF{k}")
+        ax.set_title(f"{system} membership functions")
+        ax.set_xlabel("standardised input")
+        ax.set_ylabel("membership")
+        ax.legend(fontsize=6)
+    fig.tight_layout()
+    p = FIG_DIR / f"fuzzy_v2_membership_{name}.png"
+    fig.savefig(p, dpi=140)
+    plt.close(fig)
+    paths.append(p)
+
+    spec = params["width"]  # type: ignore[index]
+    if len(spec["inputs"]) == 2:  # type: ignore[arg-type]
+        grid = np.linspace(-2.5, 2.5, 60)
+        xx, yy = np.meshgrid(grid, grid)
+        x = np.stack([xx.ravel(), yy.ravel()], axis=1)
+        z = _fis_numpy(spec, _norm_inputs(x, spec)).reshape(xx.shape)
+        fig, ax = plt.subplots(figsize=(5, 4))
+        cs = ax.contourf(xx, yy, z, levels=20, cmap="RdBu_r")
+        fig.colorbar(cs, ax=ax, label="log width multiplier m")
+        ax.set_xlabel(spec["inputs"][0]); ax.set_ylabel(spec["inputs"][1])
+        ax.set_title("FIS_width surface")
+        fig.tight_layout()
+        p = FIG_DIR / f"fuzzy_v2_surface_{name}.png"
+        fig.savefig(p, dpi=140)
+        plt.close(fig)
+        paths.append(p)
+    return paths

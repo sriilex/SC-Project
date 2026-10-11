@@ -4,11 +4,20 @@ import polars as pl
 
 
 class CongestionFeature:
-    """Compute congestion features using origin and destination port calls, exports, and imports."""
+    """Compute congestion features using origin and destination port calls, exports, and imports.
 
-    def __init__(self, origin_ports: list[str], dest_ports: list[str]):
+    Parameters
+    ----------
+    lag_days:
+        Calendar days to lag the congestion columns. PortWatch publication lag is
+        undocumented, so a 7-day lag is a defensible leakage guard for the
+        robustness run; 0 reproduces the original same-day features.
+    """
+
+    def __init__(self, origin_ports: list[str], dest_ports: list[str], lag_days: int = 0):
         self.origin_ports = origin_ports
         self.dest_ports = dest_ports
+        self.lag_days = lag_days
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         """Apply congestion feature extraction."""
@@ -29,7 +38,12 @@ class CongestionFeature:
             sum_cols(origin_exports_cols).log1p().alias("congestion_origin_exports_log1p"),
             sum_cols(dest_imports_cols).log1p().alias("congestion_dest_imports_log1p"),
         ]
-        return df.with_columns(exprs)
+        out = df.with_columns(exprs)
+        if self.lag_days:
+            out = out.with_columns([
+                pl.col(c).shift(self.lag_days).alias(c) for c in self.feature_names_out()
+            ])
+        return out
 
     def feature_names_out(self) -> list[str]:
         """Return the names of the generated features."""

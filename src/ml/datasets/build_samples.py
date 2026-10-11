@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import tomllib
 from datetime import date, timedelta
 from pathlib import Path
@@ -79,9 +80,13 @@ def main() -> None:
     master_wide = add_calendar_features(master_wide, cny_dates)
     
     LOGGER.info("Adding congestion features")
+    congestion_lag_days = int(
+        os.environ.get("CONGESTION_LAG_DAYS", config["features"].get("congestion_lag_days", 0))
+    )
     congestion_feat = CongestionFeature(
         origin_ports=config["features"]["ports"]["origin"],
-        dest_ports=config["features"]["ports"]["dest"]
+        dest_ports=config["features"]["ports"]["dest"],
+        lag_days=congestion_lag_days,
     )
     master_wide = congestion_feat.transform(master_wide)
 

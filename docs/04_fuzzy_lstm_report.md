@@ -1,198 +1,355 @@
-# Fuzzy Calibration for LSTM Freight Quantile Forecasts
+# Sugeno Fuzzy Calibration for LSTM Quantile Forecasts of Dry Bulk Vessel-Class Indices
 
-## Introduction
+## 1. Problem and setup
 
-Freight rates in dry bulk shipping are volatile and close to a random walk over short horizons. Point forecasts from any single model carry systematic error that changes with market conditions. A model that under-forecasts during a rising market and over-forecasts during a falling market produces biased quantiles even when its average error looks acceptable.
+Dry bulk freight is quoted through four vessel-class indices: Capesize,
+Panamax, Supramax and Handysize. These are **not** the Baltic Dry Index (BDI)
+composite; the BDI is only used here as a cross-series input, and every target
+below is a vessel-class index. The forecasting problem is *distributional*:
+for each class and each horizon $h \in \{1, 7, 30, 90\}$ calendar days, predict
+the P10, P50 and P90 of the future log index level $y_{t+h}$ given information
+up to $t$.
 
-This work adds a fuzzy inference layer on top of an LSTM quantile forecaster. The LSTM produces P10, P50, and P90 of the future log freight level. The fuzzy layer reads two recent market signals, recent forecast bias and recent volatility, and applies a single additive correction in log space to all three quantiles. The correction is learned from history by a small set of linguistic rules, so the adjustment is interpretable and cheap to run at inference time.
+The data pipeline builds a continuous 365-day master calendar and imputes
+missing days with last-observation-carried-forward so that lags and rolling
+statistics stay on a regular grid. Because weekends and holidays are then
+artificial rows, the model is trained and evaluated only on real market days:
+the target is shifted first, and weekend/holiday rows are dropped afterwards.
+Each horizon has its own evaluation mask (the rows where $y_{t+h}$ is a real
+market day), and all models are compared on the same rows within a horizon.
+Models are scored on the intersection of their available rows (the LSTM needs a
+warm-up window), so the deep and tree models see exactly the same test rows.
+The fixed splits contain 10,053 train, 1,565 valid and 1,277 test rows; the
+test split is read exactly once, at the final run, through a frozen-test guard.
+Forty-four Capesize train rows with a negative index value (so an undefined
+log) are dropped; see `docs/data_quality.md`.
 
-The goal is a small, auditable calibration module that can be attached to the existing forecast path without retraining the LSTM.
+## 2. Related work
 
-## Related Work
+**Point forecasting of the BDI.** Su, Park and Bae (2024) apply a
+CNN-BiLSTM-AM model to the BDI. A one-dimensional convolution extracts local
+patterns, a bidirectional LSTM models temporal dependence in both directions,
+and an attention layer weights time steps. That model produces a *single point*
+forecast. **The quantile head is this project's contribution**: the same
+backbone emits P10/P50/P90 of the future log level, and the object of study is
+the resulting interval fan.
 
-### Fuzzy time series and the FILF model
+**ANFIS on the BDI.** A 2025 line (doi 10.1007/s12197-025-09720-2) combines a
+neural component with adaptive neuro-fuzzy inference for point forecasts of the
+BDI composite. Here the targets are the four class indices and the fuzzy layer
+calibrates a pre-trained *quantile* fan rather than a point.
 
-Duru (2010), *A fuzzy integrated logical forecasting model for dry bulk shipping index forecasting*, applies fuzzy time series (FTS) methods to the Baltic Dry Index. The paper starts from the observation that classical FTS models lose accuracy on volatile series because the right-hand side of a fuzzy logical relationship can jump between extreme sets. It proposes two variants:
+**Fuzzy time series and E-FILF.** Duru (2010) proposes FILF and E-FILF for the
+BDI: first differences expose direction, a latest-value adjustment anchors the
+forecast, and E-FILF adds an error-correction term from a moving average of past
+percentage errors. That idea corrects a *point* forecast with a fixed moving
+average. This work connects it to a quantile fan: the correction is a learned,
+readable rule gate over matured forecast residuals, and it adjusts both the
+location and the width of the fan.
 
-- **FILF** (Fuzzy Integrated Logical Forecasting). First-order differencing is applied before fuzzification to reduce variance and expose direction. A latest value adjustment combines the last actual value with the raw fuzzy forecast.
-- **E-FILF** (Extended FILF). An error correction term is added, based on a moving average of past percentage errors, to move residuals closer to white noise.
-
-Both variants report lower MAPE and lower error variance than classical FTS benchmarks on monthly BDI data.
-
-### Deep quantile forecasting for the BDI
-
-The base forecaster in this work follows the CNN-BiLSTM-AM line of models used for BDI prediction. A one-dimensional convolution extracts local patterns, a bidirectional LSTM models temporal dependencies in both directions, and an attention layer weights the relevant time steps. A quantile head produces P10, P50, and P90 directly. These models report strong fit on BDI levels, but they do not include a mechanism that corrects persistent residual bias at prediction time.
+**Conformal calibration.** CQR (Romano et al., 2019) and ACI (Gibbs and Candès,
+2021) are the strong calibration baselines. They are distribution-free but
+opaque; the fuzzy layer is compared against them directly.
 
 ### Research gap
 
-Fuzzy time series methods such as FILF were built for point forecasts of a single series. Deep quantile models output a distribution, and once trained they are used as-is. They have no mechanism to correct for bias that appears in one market regime and disappears in another. This work connects the two ideas. A small fuzzy layer reads two signals from the recent past, the average error and the recent volatility, and shifts the whole quantile fan up or down before it is handed to a decision maker.
+Deep quantile models are trained once and used as-is. They have no mechanism to
+correct a bias that appears in one market regime and disappears in another, and
+they cannot fix an interval that is systematically too wide or too narrow. This
+work adds a small, interpretable calibration stage for exactly those two
+failure modes while leaving the frozen base model untouched.
 
-### What this work does
+## 3. Method
 
-This work implements a Sugeno-style fuzzy inference system (FIS) as a calibration stage after the LSTM. The FIS maps two inputs, mean percentage error and recent volatility, to one output, a log-space shift factor. The shift is added to P10, P50, and P90. This keeps the quantile spread unchanged and moves the fan up or down according to recent conditions. The module is designed for the inference path, so the LSTM is trained once and calibration is applied per forecast request.
+### 3.1 Base forecaster
 
-## Architecture
+The base model is a pooled quantile LSTM over the four classes. It consumes a
+sliding window of daily features and emits a quantile of the log return at
+horizon $h$; predictions are converted to log level by adding the current
+`log_value`. The head is **monotone by construction**:
+
+$$
+P50 = o_1, \qquad P10 = P50 - \mathrm{softplus}(o_2), \qquad P90 = P50 + \mathrm{softplus}(o_3),
+$$
+
+so raw quantiles can never cross. It is trained with the **exact pinball loss**
+on per-class, per-horizon standardised targets. The reported model is a
+five-seed ensemble; seeds differ in initialisation and batch order, and both
+the per-seed and ensemble-mean predictions are saved so seed spread can be
+inspected.
+
+### 3.2 Sugeno calibration layer
 
 ```mermaid
 flowchart TD
-    H["History split (train or train+valid)"] --> I["Input estimation<br/>mean_pct_error<br/>recent_volatility"]
-    I --> F["Sugeno FIS<br/>9 fuzzy rules<br/>min-operator firing<br/>weighted-average output"]
-    F --> S["shift_factor per target_class"]
-    Q["LSTM raw quantiles<br/>P10, P50, P90"] --> A["Add shift"]
-    S --> A
-    A --> C["Calibrated quantiles<br/>P10+shift, P50+shift, P90+shift"]
+    H["History + already-matured forecasts"] --> I["Causal inputs per forecast date<br/>cov_gap (matured residuals)<br/>vol (trailing, z-scored)<br/>bias_z (matured residuals)"]
+    I --> FW["FIS_width: (cov_gap, vol) -> m<br/>Gaussian MFs, 3x3 product rules<br/>weighted-average output"]
+    I --> FL["FIS_loc: (bias_z, vol) -> s"]
+    Q["Frozen LSTM raw quantiles<br/>P10, P50, P90"] --> A["p50' = p50 + s<br/>p10' = p50' - (p50 - p10) exp(m)<br/>p90' = p50' + (p90 - p50) exp(m)"]
+    FW --> A
+    FL --> A
+    A --> C["Calibrated quantiles<br/>(ordering preserved by construction)"]
 ```
 
-### Base forecaster
+**Inputs.** All inputs are recomputed per forecast date from information
+available at that date. Forecast residuals are *matured*: a forecast issued at
+$t$ for horizon $h$ matures at $t+h$, so the rolling window for a forecast at
+$t$ may contain only forecasts issued at or before $t-h$. A test fails if any
+future outcome is used.
 
-The base model is a pooled quantile LSTM over four vessel classes (Capesize, Panamax, Supramax, Handysize). It consumes a sliding window of daily features per class and outputs three quantiles of the log return at horizon `h`. Predictions are converted to log level by adding the current `log_value`. The fuzzy layer receives this log-level frame with columns `date`, `target_class`, `h`, `p_0.1`, `p_0.5`, `p_0.9`.
+- **cov_gap** $= P(y < P10) + P(y > P90) - 0.20$ over the last $N$ matured
+  rows. Positive means the intervals are too narrow. It is only usable at
+  $h = 1$ and $h = 7$; at $h \ge 30$ too few forecasts mature inside a split,
+  so the width system becomes volatility-only.
+- **vol**: trailing standard deviation of daily log-level changes, z-scored
+  against strictly earlier rows.
+- **bias_z**: rolling mean of $(y - P50)$ over the last $N$ matured rows,
+  divided by the rolling standard deviation of those residuals. Positive means
+  the median under-forecasts.
 
-### FIS inputs
-
-Both inputs are computed per `target_class` from a history split that precedes the forecast period.
-
-- **mean_pct_error**: average realized log return over the last `lookback` rows, divided by the mean absolute log level of those rows. Negative values indicate the market has been falling relative to recent levels, positive values indicate a rising market. This is used as a proxy for recent forecast bias.
-- **recent_volatility**: standard deviation of daily changes in `log_value` over the last `lookback + 1` rows. It measures current uncertainty.
-
-![Membership functions](figures/fuzzy_membership.png)
-
-### Rule base
-
-![Rule consequents](figures/fuzzy_rule_matrix.png)
-
-Red cells push the forecast up, blue cells push it down.
-
-The sign pattern is deliberate. When recent returns are negative, the model is expected to under-forecast, so the fan is pushed up. When recent returns are positive, the model is expected to over-forecast, so the fan is pushed down. Larger volatility produces a larger correction in the same direction.
-
-### Defuzzification
-
-The output uses Sugeno weighted average. For firing strengths $s_i$ and consequents $c_i$:
+**Rule base and defuzzification.** Each FIS is a 3×3 Sugeno system (3 rules for
+the volatility-only width system) with Gaussian membership functions with
+learnable centres and widths, combined by the product t-norm. The output is the
+weighted average of the consequents,
 
 $$
-\text{shift} = \frac{\sum_i s_i\, c_i}{\sum_i s_i}
+\text{net} = \frac{\sum_i s_i\, c_i}{\sum_i s_i},
 $$
 
-If the total firing strength $\sum_i s_i$ is below $10^{-9}$, the shift is 0. This handles the case where the inputs fall outside all membership functions. The result is a single scalar per class, and the same scalar is added to P10, P50, and P90.
+bounded through `tanh`: $m = 0.7\tanh(\text{net})$ for the log width multiplier
+and $s = 0.15\tanh(\text{net})$ for the location shift. Consequents start at
+zero, so the untrained layer is exactly the identity; if the total firing
+strength is below $10^{-9}$, the raw quantiles are returned. Only the FIS
+parameters are trained (on valid, with the base frozen); the module is
+numpy-only at inference and reads a small JSON file.
 
-![Defuzzified shift surface](figures/fuzzy_rule_surface.png)
+**Frozen configuration (pre-registered, one per horizon).**
 
-The surface shows what `sugeno_shift` returns for every combination of the two clamped inputs, after the nine rules are combined. The left region (negative bias) is positive, the right region (positive bias) is negative, and the middle region (neutral bias) is close to zero. Vertical bands appear where the bias membership changes set, and the surface rises in the negative-bias region as volatility increases.
+| horizon | width system | location system |
+|---|---|---|
+| h=1 | `FIS_width(cov_gap, vol)` | `FIS_loc(bias_z, vol)` |
+| h=7 | `FIS_width(cov_gap, vol)` | `FIS_loc(bias_z, vol)` |
+| h=30 | `FIS_width(vol)` (vol-only) | `FIS_loc(bias_z, vol)` |
+| h=90 | `FIS_width(vol)` (vol-only) | `FIS_loc(bias_z, vol)` |
 
-## Implementation
+This configuration was fixed before the test split was scored and is not
+retuned on test. The trained membership functions and rule surfaces are dumped
+to `src/data/fuzzy_params/lstm_fuzzy_h*.json` and plotted to
+`docs/figures/fuzzy_v2_*.png`.
 
-### Files
+![Width and location membership functions at h=1](figures/fuzzy_v2_membership_h1.png)
 
-- `src/ml/fuzzy_calibration.py`: membership functions, rule base, defuzzification, input estimation, and the public `calibrate` function.
-- `src/ml/models/lstm.py`: the quantile LSTM base forecaster.
-- `src/ml/inference.py`: `FreightPredictor.predict`, the live path that applies calibration.
-- `src/ml/baselines.py`: evaluation harness that produces the before/after comparison.
+![Learned rule surface at h=1](figures/fuzzy_v2_surface_h1.png)
 
-### Calibration function
+![Width and location membership functions at h=90](figures/fuzzy_v2_membership_h90.png)
 
-```
-calibrate(pred_df, history_df, h, lookback=60) -> pl.DataFrame
-```
+### 3.3 Baselines and evaluation
 
-Steps:
+The harness (`src/ml/baselines.py`) scores, per horizon, on that horizon's
+mask on a common support: `lstm`, `lstm_fuzzy`, `cqr`, `aci`, `ar1`, `xgb` and
+`rw_emp` (plus `const_shift`, `lgbm`, `rw`, `lstm_fuzzy_old` in the full
+tables). `ar1` is an AR(1) with drift on log returns. `rw_emp` is historical
+simulation; its P50 is the current level, so its directional hit rate is N/A.
+Conformal layers and the fuzzy layer are fit on valid and frozen for test, so
+valid numbers for those layers are in-sample and only test is clean.
 
-1. Collect the distinct `target_class` values in `pred_df`.
-2. For each class, filter `history_df` to that class. If the class has no history, fall back to the pooled history.
-3. Compute `mean_pct_error` and `recent_volatility` from the filtered history.
-4. Evaluate the FIS to get one shift per class.
-5. Build a mapping expression from class to shift.
-6. Return `pred_df` with `p_0.1`, `p_0.5`, and `p_0.9` each increased by the class shift.
-
-The function preserves the input schema and does not change the order of rows.
-
-### Inference wiring
-
-`FreightPredictor.predict` accepts an optional `history_df`. When it is provided, the raw quantile frame is passed to `fuzzy_calibrate` before being returned. When it is `None`, the raw quantiles are returned unchanged. This keeps calibration optional and backwards compatible.
-
-```python
-raw_pred = df.select(*exprs)
-if history_df is not None:
-    return fuzzy_calibrate(raw_pred, history_df, self.h)
-return raw_pred
-```
-
-### Baseline comparison
-
-`src/ml/baselines.py` trains the LSTM once and evaluates two variants:
-
-- `lstm`: raw quantiles.
-- `lstm_fuzzy`: quantiles after calibration.
-
-Calibration uses only data known before the evaluated split. Valid forecasts are calibrated against the train split. Test forecasts are calibrated against the concatenation of train and valid. This avoids leakage from future observations.
-
-The harness supports a filter so that only the relevant models run:
-
-```bash
-BASELINES_MODELS=lstm uv run baselines
-```
-
-The metrics are written to `src/data/baseline_metrics.csv` with pinball loss per quantile, median MAE, and directional hit rate, both pooled and per class.
-
-### Evaluation metric: pinball loss
-
-Each quantile is scored on its own with the pinball loss. For target $y$,
-prediction $p$, and quantile level $q$:
+Metrics are the **pinball loss** per quantile and its mean, **central-80
+coverage**, the **Winkler-80 interval score**, median MAE, crossing rate and
+directional hit rate next to the always-up rate. The pinball loss is
 
 $$
-L_q(y, p) =
-\begin{cases}
-q\,(y - p) & y \ge p \\[4pt]
-(1 - q)\,(p - y) & y < p
-\end{cases}
+L_q(y,p) = \max\bigl(q\,(y-p),\,(q-1)\,(y-p)\bigr),
 $$
 
-Written in one line:
+an asymmetric absolute error that is minimised by the true $q$-th quantile;
+at $q=0.5$ it equals $\tfrac12|y-p|$. Significance uses a Diebold-Mariano test
+with a Newey-West HAC standard error at lag $h-1$ and a moving-block bootstrap
+95% interval. Coverage and Winkler are reported alongside pinball because the
+contribution is probabilistic.
 
-$$
-L_q(y, p) = \max\bigl(q\,(y - p),\; (q - 1)\,(y - p)\bigr)
-$$
+## 4. Finding 1 — the diagnostic: an unconstrained head fails
 
-The loss is an asymmetric absolute error. When the actual value is above the
-prediction, the error is weighted by $q$. When it is below, the error is
-weighted by $1 - q$. A high quantile such as P90 is therefore punished more for
-under-predicting than for over-predicting, which pushes it toward the upper
-tail of the distribution.
+Before the head change, an unconstrained quantile head trained under a
+Huber-like loss produced badly ordered fans: **P10 > P50 in up to 66.5% of
+rows at h=1 and 57.5% at h=7**, with central-80 coverage of only 18–28% at the
+short horizons. The intervals were not merely biased; they were not intervals.
 
-Two properties are useful when reading the results table:
+The monotone head with an exact pinball loss, per-class/horizon target
+standardisation and width biases initialised from train empirical half-widths
+fixed the ordering. Pooled central-80 coverage became:
 
-1. At $q = 0.5$ the two weights are equal and the loss becomes
-   $\tfrac{1}{2}|y - p|$. The median MAE reported by the harness is exactly twice the
-   `pinball_0.5` value for this reason.
-2. Minimizing the expected pinball loss is equivalent to predicting the true
-   $q$-th quantile. A model that outputs the real P10, P50, and P90 has the
-   lowest achievable average pinball loss for those three levels.
+| split | h=1 | h=7 | h=30 | h=90 |
+|---|---|---|---|---|
+| train | 0.776 | 0.810 | 0.825 | 0.828 |
+| valid | 0.766 | 0.838 | 0.840 | 0.925 |
 
-The three losses are averaged over rows for each level, so lower is better. As
-a coverage check, a well-calibrated model should satisfy
-$\Pr(y < p_{0.1}) \approx 0.10$ and $\Pr(y < p_{0.9}) \approx 0.90$.
+Train coverage is inside the pre-registered 0.70–0.90 gate at every horizon, so
+no re-tuning was needed, and **quantile crossings are exactly 0 at every
+horizon**. This diagnostic is the reason the rest of the work is about
+calibration rather than architecture.
 
-## Results and Limitations
+## 5. Finding 2 — results
 
-The table below reports pooled validation results for the two variants. Lower pinball and MAE are better. Higher directional hit rate is better.
+### 5.1 Main table (test, common support)
 
-| h | lstm pinball P50 | lstm_fuzzy pinball P50 | delta | lstm dir_hit | lstm_fuzzy dir_hit |
-|---|---|---|---|---|---|
-| 1 | 0.007801 | 0.007806 | +0.000005 | 0.8458 | 0.8480 |
-| 7 | 3.421349 | 3.422261 | +0.000912 | 0.4648 | 0.4648 |
-| 30 | 3.429806 | 3.430717 | +0.000912 | 0.5110 | 0.5110 |
-| 90 | 3.393264 | 3.394176 | +0.000912 | 0.5419 | 0.5419 |
+Skill is pinball divided by the `rw_emp` pinball at the same horizon (lower is
+better; 0.715 means 28.5% lower loss than historical simulation). Coverage and
+Winkler-80 are shown because the target is a distribution, not a point.
 
-The correction is small at every horizon. Directional hit rate improves slightly at h=1 and is unchanged elsewhere. The pushback on the interval losses is about 0.0009 at h=7 and above.
+| h | model | n | mean pinball | skill vs rw_emp | cover-80 | Winkler-80 |
+|---|-------|---|--------------|-----------------|----------|------------|
+| 1 | lstm | 765 | 0.00715 | 1.202 | 0.8366 | 0.1164 |
+| 1 | lstm_fuzzy | 765 | 0.00779 | 1.311 | 0.7412 | 0.1274 |
+| 1 | cqr | 765 | 0.00716 | 1.204 | 0.8706 | 0.1173 |
+| 1 | aci | 765 | 0.00707 | 1.189 | 0.8157 | 0.1141 |
+| 1 | ar1 | 765 | 0.00665 | 1.119 | 0.9242 | 0.1225 |
+| 1 | **xgb** | 765 | **0.00425** | **0.715** | 0.7660 | **0.0630** |
+| 1 | rw_emp | 765 | 0.00595 | 1.000 | 0.8693 | 0.0894 |
+| 7 | lstm | 895 | 0.02200 | 1.049 | 0.9084 | 0.3293 |
+| 7 | lstm_fuzzy | 895 | 0.02433 | 1.161 | 0.8078 | 0.3749 |
+| 7 | cqr | 895 | 0.02179 | 1.039 | 0.8860 | 0.3229 |
+| 7 | aci | 895 | 0.02136 | 1.019 | 0.8078 | 0.3100 |
+| 7 | ar1 | 895 | 0.02211 | 1.055 | 0.9318 | 0.3570 |
+| 7 | **xgb** | 895 | **0.01876** | **0.895** | 0.8313 | **0.2609** |
+| 7 | rw_emp | 895 | 0.02096 | 1.000 | 0.8972 | 0.3105 |
+| 30 | lstm | 505 | 0.04833 | 0.973 | 0.9386 | 0.7487 |
+| 30 | lstm_fuzzy | 505 | 0.04620 | 0.931 | 0.7683 | 0.6829 |
+| 30 | cqr | 505 | 0.04834 | 0.974 | 0.8990 | 0.7129 |
+| 30 | **aci** | 505 | **0.04451** | **0.896** | 0.8099 | **0.6343** |
+| 30 | ar1 | 505 | 0.05221 | 1.051 | 0.9386 | 0.8611 |
+| 30 | xgb | 505 | 0.05712 | 1.150 | 0.5030 | 0.8906 |
+| 30 | rw_emp | 505 | 0.04965 | 1.000 | 0.9307 | 0.7862 |
+| 90 | lstm | 571 | 0.06914 | 0.947 | 0.9912 | 1.1143 |
+| 90 | **lstm_fuzzy** | 571 | **0.05188** | **0.711** | 0.8616 | **0.7259** |
+| 90 | cqr | 571 | 0.05953 | 0.816 | 0.9054 | 0.8801 |
+| 90 | aci | 571 | 0.05894 | 0.808 | 0.6935 | 0.8086 |
+| 90 | ar1 | 571 | 0.07464 | 1.023 | 0.9930 | 1.2730 |
+| 90 | xgb | 571 | 0.12465 | 1.708 | 0.1068 | 2.2599 |
+| 90 | rw_emp | 571 | 0.07298 | 1.000 | 0.9842 | 1.2361 |
 
-Two properties of the current setup explain the small effect:
+The table tells a horizon-dependent story:
 
-1. The bias input is scaled by the mean log level, which is roughly 7 to 9. A recent log return of about 1 percent becomes a bias value near 0.001. This lands in the neutral membership region for most classes, so the firing strengths are low and the shift is near zero. Only Panamax produced a nonzero shift in the sampled runs.
-2. The shift is a constant added to all three quantiles. A constant shift can correct a location bias. It cannot correct a wrong spread, a wrong shape, or a scale error in the base model. The base LSTM already has large interval losses at longer horizons, and a small location correction does not address those.
+- **h ≤ 7:** gradient-boosted trees (`xgb`) win, with skill 0.715 and 0.895
+  against historical simulation. The deep model is at parity with the conformal
+  baselines and `rw_emp`, and the fuzzy layer is significantly *worse*.
+- **h = 30:** ACI is best (skill 0.896); the fuzzy layer is second (0.931) and
+  statistically tied with it.
+- **h = 90:** the fuzzy layer is best (skill 0.711), ahead of CQR (0.816) and
+  ACI (0.808), and its central-80 coverage (0.862) is far closer to nominal than
+  the raw LSTM's 0.991.
 
-The calibration layer is therefore best described as a working, interpretable mechanism whose current input scaling limits its impact. The design is correct and the inference path is complete. Tuning the input scale and consequents is the next step before it can be expected to reduce loss.
+### 5.2 Leakage check on the tree models
+
+The h=1 `xgb` pinball (0.00425) is far below the deep model, so its feature set
+was audited. `make_matrix` excludes every target-derived column —
+`y_step_h*`, `y_mean_h*`, `target_ret_h*` — for all horizons, and also excludes
+`date`, `log_value` and `target_value`; `target_class` is retained as an
+intended categorical feature. The 46 features contain no residual target
+column, and the top gains at h=1 are `ret_1`, `target_class`,
+`cross_BC_INDEX_ret_1`, `cross_BDI_ret_1`, `ret_7`, `lag_*` and rolling
+statistics — all past-only. **The h=1 result is not a leak.**
+
+Comparing the tree model with the autocorrelation baselines on the same rows
+makes the source of the short-horizon signal explicit: `xgb` reaches skill
+0.715, `ar1` 1.119 and `rw_emp` 1.000 at h=1, and 0.895 / 1.055 / 1.000 at h=7.
+Trees beat persistence by 29% at h=1, so the signal is not *only* return
+autocorrelation, but the autocorrelation/persistence baselines are close
+enough that short-horizon gains should be attributed largely to momentum in the
+index levels rather than to the deep sequence model.
+
+### 5.3 Significance (test, mean pinball)
+
+Difference `lstm_fuzzy − competitor`; negative favours the fuzzy layer.
+
+| h | competitor | mean diff | DM p | bootstrap 95% |
+|---|---|---|---|---|
+| 1 | aci | +0.00072 | <0.001 | [+0.00041, +0.00105] |
+| 1 | cqr | +0.00063 | <0.001 | [+0.00035, +0.00095] |
+| 1 | lstm | +0.00065 | <0.001 | [+0.00038, +0.00095] |
+| 7 | aci | +0.00297 | <0.001 | [+0.00194, +0.00407] |
+| 7 | cqr | +0.00254 | <0.001 | [+0.00152, +0.00367] |
+| 7 | lstm | +0.00233 | <0.001 | [+0.00130, +0.00347] |
+| 30 | aci | +0.00169 | 0.286 | [−0.00178, +0.00396] |
+| 30 | cqr | −0.00214 | 0.183 | [−0.00561, +0.00036] |
+| 30 | lstm | −0.00212 | 0.163 | [−0.00545, +0.00049] |
+| 90 | aci | −0.00707 | 0.218 | [−0.01919, +0.00243] |
+| 90 | cqr | −0.00765 | 0.047 | [−0.01575, −0.00055] |
+| 90 | lstm | −0.01726 | <0.001 | [−0.02601, −0.00927] |
+
+The fuzzy layer is significantly worse than every competitor at h=1 and h=7,
+indistinguishable at h=30, and significantly better than the raw LSTM and CQR
+at h=90 (vs ACI the interval includes zero). Because 90-day windows overlap and
+the four classes are correlated, the bootstrap interval is the primary
+evidence and the DM p-values are reported for completeness.
+
+The h=90 gain is **not driven by one class**. Skill versus the class-specific
+`rw_emp` at h=90 is 0.749 (Capesize), 0.734 (Panamax), 0.651 (Supramax) and
+0.645 (Handysize); the fuzzy layer is the best model in all four classes. Per
+class, coverage moves from 0.99 (raw LSTM) toward 0.85–0.92.
+
+One confound must be stated. The test window is an up-trending regime: the
+pooled up-rate rises from 0.48 / 0.51 / 0.50 / 0.54 on valid to
+0.54 / 0.58 / 0.60 / 0.65 on test at h=1/7/30/90. Part of the h=90 location
+correction may therefore be capturing a valid-to-test drift that a rolling
+evaluation would expose; the width correction (the part that fixes the raw
+LSTM's 0.99 coverage down to 0.86) is not a drift effect.
+
+### 5.4 Post-hoc ablations (not used for the reported model)
+
+These arms were run *after* the test split had been read and are shown only to
+explain the short-horizon loss. They were not used to select the reported
+configuration. Test pooled pinball by arm:
+
+| h | both (reported) | widthonly | loconly | novol |
+|---|---|---|---|---|
+| 1 | 0.00779 | 0.00711 | 0.00755 | 0.00707 |
+| 7 | 0.02433 | 0.02221 | 0.02300 | 0.02242 |
+| 30 | 0.04620 | 0.04543 | 0.05131 | 0.04480 |
+| 90 | 0.05188 | 0.05851 | 0.06443 | 0.05210 |
+
+The joint width+location arm is best only at h=90. At h ≤ 30 the location shift
+and the volatility input both hurt, and a simpler width-only or no-volatility
+arm would have scored better. The location-only arm never wins, confirming that
+the useful signal is in the interval *width*. Because the test split was
+already read when these were run, this is reported as a **hypothesis for the
+short-horizon loss, not a tuned result**.
+
+## 6. Limitations
+
+* **Fixed split, single episode.** One fixed valid and one fixed test window; a
+  rolling-origin evaluation was not run, so all test numbers are a single
+  out-of-sample episode.
+* **Test read once.** The test split was scored once at the end through a
+  frozen-test guard. No model or bound was tuned on it; the ablations in §5.4
+  are explicitly post-hoc.
+* **Small effective sample.** Overlapping targets (up to 90 days) and four
+  correlated classes shrink the effective sample far below the row counts. The
+  block bootstrap quantifies but cannot remove this.
+* **Fuzzy and conformal valid numbers are in-sample.** Only the test column is a
+  clean out-of-sample comparison for those layers.
+* **Frozen fuzzy bounds were not tuned.** The `0.7·tanh` width and `0.15·tanh`
+  location bounds were pre-registered; §5.4 suggests a width-only / no-volatility
+  variant at h ≤ 30, which is left as future work.
+* **h=90 may partly reflect regime drift.** The valid-to-test up-rate shift is
+  documented; a rolling evaluation is needed to separate calibration skill from
+  drift capture.
+* **ACI under-covers at h=90** (0.694) despite a good pinball mean.
+* **`lstm_fuzzy_old`** (constant location shift) changes valid pinball by under
+  0.3% and cannot fix width or ordering; it is retained only as an ablation.
+* **Staged, not joint, training.** The base model is frozen and only the FIS is
+  trained; joint training was not run.
+* **Data robustness is reported separately.** A rebuild with a 7-day congestion
+  lag and the direct `macro_*_chg_90d` difference changes valid pooled pinball by
+  at most +0.0004 at h=1/7 (up to ~+0.003 at h=30/90); the headline conclusions
+  are unchanged. Forty-four negative-index Capesize rows are dropped.
 
 ## References
 
 1. Duru, O. (2010). A fuzzy integrated logical forecasting model for dry bulk shipping index forecasting: An improved fuzzy time series approach. *Expert Systems with Applications*.
-2. Song, Q., and Chissom, B. S. (1993). Fuzzy time series and its models. *Fuzzy Sets and Systems*.
-3. Takagi, T., and Sugeno, M. (1985). Fuzzy identification of systems and its applications to modeling and control. *IEEE Transactions on Systems, Man, and Cybernetics*.
-4. Koenker, R., and Bassett, G. (1978). Regression quantiles. *Econometrica*.
+2. Su, M., Park, K., and Bae, S. (2024). Deep learning for the Baltic Dry Index: A CNN-BiLSTM-AM approach. *Maritime Economics and Logistics*.
+3. ANFIS-based forecasting of the Baltic Dry Index (2025). *Journal of Economics and Finance*. doi:10.1007/s12197-025-09720-2
+4. Romano, Y., Patterson, E., and Candès, E. J. (2019). Conformalized quantile regression. *Advances in Neural Information Processing Systems*.
+5. Gibbs, I., and Candès, E. J. (2021). Adaptive conformal inference under distribution shift. *Advances in Neural Information Processing Systems*.
+6. Song, Q., and Chissom, B. S. (1993). Fuzzy time series and its models. *Fuzzy Sets and Systems*.
+7. Takagi, T., and Sugeno, M. (1985). Fuzzy identification of systems and its applications to modeling and control. *IEEE Transactions on Systems, Man, and Cybernetics*.
+8. Koenker, R., and Bassett, G. (1978). Regression quantiles. *Econometrica*.

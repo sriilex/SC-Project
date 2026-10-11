@@ -62,11 +62,16 @@ class MacroFeature:
         )
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Left-join level + trailing-change onto ``df`` by date (as-of,
+        """Left-join level + trailing absolute change onto ``df`` by date (as-of,
         backward-filled to the last real observation). Dates before the
         series' own first real observation get null -- never a fabricated
         pre-history value. ``df`` must be sorted by date (every existing
-        feature transform in this package assumes the same of its input)."""
+        feature transform in this package assumes the same of its input).
+
+        The trailing change is the direct level difference ``level(t) -
+        level(t - window)`` computed on the caller's continuous daily grid,
+        not a percentage change computed on the series' own bounded grid.
+        """
         level_col = f"macro_{self.stem}_level"
         change_col = f"macro_{self.stem}_chg_{self.change_window_days}d"
 
@@ -76,25 +81,12 @@ class MacroFeature:
                 pl.lit(None, dtype=pl.Float64).alias(change_col),
             )
 
-        # The real series is rarely daily (monthly commodities, business-day
-        # FX) -- reindex onto a dense daily calendar, forward-filling the last
-        # known real value, so a fixed CALENDAR-day change window is well
-        # defined regardless of the source's native cadence.
-        full_range = pl.date_range(self._series["date"].min(), self._series["date"].max(), interval="1d", eager=True)
-        dense = (
-            pl.DataFrame({"date": full_range})
-            .join(self._series, on="date", how="left")
-            .with_columns(pl.col("value").forward_fill())
-            .with_columns(pl.col("value").shift(self.change_window_days).alias("_lagged_value"))
-            .with_columns(
-                pl.when(pl.col("_lagged_value").abs() > 0)
-                .then((pl.col("value") - pl.col("_lagged_value")) / pl.col("_lagged_value").abs())
-                .otherwise(None)
-                .alias(change_col)
-            )
-            .select("date", pl.col("value").alias(level_col), change_col)
+        series = self._series.rename({"value": level_col})
+        out = df.join_asof(series, on="date", strategy="backward")
+        out = out.with_columns(
+            (pl.col(level_col) - pl.col(level_col).shift(self.change_window_days)).alias(change_col)
         )
-        return df.join_asof(dense, on="date", strategy="backward")
+        return out
 
     def feature_names_out(self) -> list[str]:
         return [f"macro_{self.stem}_level", f"macro_{self.stem}_chg_{self.change_window_days}d"]
