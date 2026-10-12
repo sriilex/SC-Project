@@ -8,19 +8,6 @@ from lib import loaders, viz
 from lib.paths import MODEL_LABELS, PAPER_MODELS
 
 
-def _with_skill(df: pl.DataFrame) -> pl.DataFrame:
-    if df.is_empty():
-        return df
-    ref = df.filter(pl.col("model") == "rw_emp").select(
-        "split", "h", "scope", pl.col("pinball_mean").alias("_rw")
-    )
-    return (
-        df.join(ref, on=["split", "h", "scope"], how="left")
-        .with_columns((pl.col("pinball_mean") / pl.col("_rw")).alias("skill vs rw_emp"))
-        .drop("_rw")
-    )
-
-
 def _present_models(df: pl.DataFrame, split: str) -> list[str]:
     if df.is_empty():
         return []
@@ -71,9 +58,7 @@ def render() -> None:
         picked = models
 
     src = common if not common.is_empty() else full
-    table = _with_skill(
-        src.filter((pl.col("split") == split) & (pl.col("scope") == "POOLED"))
-    )
+    table = src.filter((pl.col("split") == split) & (pl.col("scope") == "POOLED"))
 
     st.subheader("Common-support main table")
     show = (
@@ -83,7 +68,6 @@ def render() -> None:
             pl.col("model").replace_strict({m: MODEL_LABELS.get(m, m) for m in picked}),
             "n",
             pl.col("pinball_mean").round(5),
-            pl.col("skill vs rw_emp").round(3),
             pl.col("cover_80").round(4),
             pl.col("winkler_80").round(4),
             pl.col("dir_hit").round(3),
@@ -92,8 +76,8 @@ def render() -> None:
     )
     st.dataframe(show, hide_index=True, width="stretch")
     st.caption(
-        "Skill = pinball ÷ rw_emp pinball at the same horizon (lower is better). "
-        "All models in this table are scored on exactly the same rows."
+        "All models in this table are scored on exactly the same rows; "
+        "lower pinball is better."
     )
 
     st.divider()
@@ -140,7 +124,8 @@ def render() -> None:
     if not wins.is_empty():
         st.dataframe(wins, hide_index=True, width="stretch")
     st.caption(
-        "Ties are listed together. In the paper, XGBoost wins at h ≤ 7 and the Sugeno layer wins at h = 90."
+        "Ties are listed together; the model with the lowest mean pinball wins "
+        "at each horizon and scope."
     )
 
     st.divider()
@@ -192,8 +177,7 @@ def render() -> None:
         st.info("No per-class rows.")
     else:
         st.dataframe(
-            _with_skill(pc)
-            .filter(pl.col("model").is_in(picked))
+            pc.filter(pl.col("model").is_in(picked))
             .select(
                 "scope",
                 pl.col("model"),

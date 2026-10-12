@@ -47,10 +47,10 @@ def _methods(h: int, cls: str):
     }
 
 
-def _xgb_tab() -> None:
+def _live_tab() -> None:
     st.caption(
-        "Runs the exported XGBoost quantile models live on cached validation features "
-        "(the same models the pipeline exports with `ml.export`)."
+        "Runs the frozen quantile LSTM live on cached validation features and "
+        "overlays its central-80 fan for the selected date and class."
     )
     c1, c2, c3, c4 = st.columns(4)
     h = c1.selectbox("Horizon", HORIZONS, index=1, key="pg_h")
@@ -78,7 +78,7 @@ def _xgb_tab() -> None:
         predictor = _predictor(h)
         xgb = predictor.predict(window_df)
     except Exception as exc:  # noqa: BLE001 - surface a friendly message
-        st.error(f"XGBoost inference failed: {exc}")
+        st.error(f"LSTM inference failed: {exc}")
         return
 
     lstm = (
@@ -93,7 +93,7 @@ def _xgb_tab() -> None:
             xgb,
             lstm,
             truth.select("date", "y"),
-            title=f"XGBoost (band) vs LSTM (line) — {cls}, h={h}",
+            title=f"LSTM central-80 (band) vs LSTM median (line) — {cls}, h={h}",
         ),
         width="stretch",
     )
@@ -242,10 +242,10 @@ def _compare_tab() -> None:
 def render() -> None:
     st.title("Playground")
     t1, t2, t3 = st.tabs(
-        ["Live XGBoost inference", "Manual Sugeno calculator", "Per-class comparison"]
+        ["Live neural inference", "Manual Sugeno calculator", "Per-class comparison"]
     )
     with t1:
-        _xgb_tab()
+        _live_tab()
     with t2:
         _calculator_tab()
     with t3:

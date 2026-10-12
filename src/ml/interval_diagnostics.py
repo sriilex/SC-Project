@@ -1,10 +1,9 @@
-"""Interval-calibration diagnostics for the raw quantile LSTM vs rw_emp.
+"""Interval-calibration diagnostics for the raw quantile LSTM.
 
 For each split (train, valid), horizon and scope (POOLED + the four classes)
 reports below-P10, below-P90, central-80, mean interval width, P50 reliability,
-quantile-crossing rates and per-quantile pinball loss. The LSTM and rw_emp are
-scored on the *same* per-horizon rows (the horizon target is non-null and the
-LSTM emitted a prediction), so widths and losses are like-for-like.
+quantile-crossing rates and per-quantile pinball loss. All statistics are scored
+on the rows the LSTM predicted and for which the horizon target is non-null.
 
 A second, common-support table reproduces the old all-horizons-non-null filter
 as a robustness output.
@@ -23,10 +22,8 @@ from ml.baselines import (
     DATA,
     HORIZONS,
     QUANTILES,
-    fit_rw_emp,
     load_split,
     pinball,
-    predict_rw_emp,
 )
 from ml.predictions import ensure_lstm_predictions
 
@@ -63,7 +60,6 @@ def _score_split(
     split: str,
     source: pl.DataFrame,
     lstm_preds: dict[int, pl.DataFrame],
-    train_for_rw: pl.DataFrame,
     common_only: bool,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
@@ -77,14 +73,12 @@ def _score_split(
             truth = truth.join(common.select("date", "target_class"), on=["date", "target_class"], how="inner")
         # LSTM support = rows it predicted AND for which the target exists.
         base = truth.join(lp.select("date", "target_class"), on=["date", "target_class"], how="inner")
-        rp = predict_rw_emp(source, h, fit_rw_emp(train_for_rw, h))
-        for model_name, pred in (("lstm", lp), ("rw_emp", rp)):
-            j_all = base.join(pred, on=["date", "target_class"], how="inner").drop_nulls("y")
-            for scope in SCOPES:
-                sub = j_all if scope == "POOLED" else j_all.filter(pl.col("target_class") == scope)
-                if sub.is_empty():
-                    continue
-                rows.append({"split": split, "h": h, "scope": scope, "model": model_name, **_stats(sub)})
+        j_all = base.join(lp, on=["date", "target_class"], how="inner").drop_nulls("y")
+        for scope in SCOPES:
+            sub = j_all if scope == "POOLED" else j_all.filter(pl.col("target_class") == scope)
+            if sub.is_empty():
+                continue
+            rows.append({"split": split, "h": h, "scope": scope, "model": "lstm", **_stats(sub)})
     return rows
 
 
@@ -97,7 +91,7 @@ def main() -> None:
 
     rows: list[dict[str, object]] = []
     for split in ("train", "valid"):
-        rows.extend(_score_split(split, splits[split], preds[split], splits["train"], common_only=False))
+        rows.extend(_score_split(split, splits[split], preds[split], common_only=False))
     out = pl.DataFrame(rows).sort(["split", "h", "scope", "model"])
     path = DATA / "interval_diagnostics.csv"
     out.write_csv(path)
@@ -106,7 +100,7 @@ def main() -> None:
     # Robustness: the old all-horizons-non-null common support.
     common_rows: list[dict[str, object]] = []
     for split in ("train", "valid"):
-        common_rows.extend(_score_split(split, splits[split], preds[split], splits["train"], common_only=True))
+        common_rows.extend(_score_split(split, splits[split], preds[split], common_only=True))
     common = pl.DataFrame(common_rows).sort(["split", "h", "scope", "model"])
     common_path = DATA / "interval_diagnostics_common.csv"
     common.write_csv(common_path)

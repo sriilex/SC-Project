@@ -13,7 +13,7 @@ from __future__ import annotations
 import polars as pl
 import torch
 
-from ml.baselines import evaluate, fit_rw_emp, load_split, predict_rw_emp
+from ml.baselines import evaluate, load_split, pinball
 from ml.models.lstm import EXCLUDE, LSTMModel, add_target_returns, create_windows
 
 
@@ -67,12 +67,14 @@ def test_create_windows_target_is_return_scale() -> None:
     assert (joined["y"] - joined["target_ret_h7"]).abs().max() < 1e-5
 
 
-def test_lstm_h7_median_pinball_within_order_of_random_walk() -> None:
-    """The trained LSTM h=7 P50 must stay within [0.5x, 2x] of rw_emp.
+def test_lstm_h7_median_pinball_is_reasonable() -> None:
+    """The trained LSTM h=7 P50 must stay within [0.5x, 2x] of persistence.
 
-    Scored on the shared per-horizon rows. The pre-fix level-scale bug produced
-    pinball ~3.4 against a random-walk baseline of ~0.05, so this bound fails
-    loudly on regression while allowing normal training noise.
+    Scored on the shared per-horizon rows. Persistence predicts the current log
+    level as the median (the removed ``rw_emp`` baseline did the same). The
+    pre-fix level-scale bug produced pinball ~3.4 against a persistence
+    reference of ~0.05, so this bound fails loudly on regression while allowing
+    normal training noise.
     """
     train = load_split("train")
     valid = load_split("valid")
@@ -84,12 +86,17 @@ def test_lstm_h7_median_pinball_within_order_of_random_walk() -> None:
     lstm_pinball = next(r["pinball_0.5"] for r in lstm_rows if r["scope"] == "POOLED")
     lstm_cross = next(r["x_p10_gt_p50"] for r in lstm_rows if r["scope"] == "POOLED")
 
-    rw_pred = predict_rw_emp(valid, 7, fit_rw_emp(train, 7))
-    rw_rows = evaluate(rw_pred, valid, "valid", "rw_emp")
-    rw_pinball = next(r["pinball_0.5"] for r in rw_rows if r["scope"] == "POOLED")
+    # Persistence reference: median = current level, on the rows the LSTM scored.
+    truth = valid.select(
+        "date", "target_class", pl.col("y_step_h7").alias("y"), "log_value"
+    ).drop_nulls("y")
+    shared = truth.join(
+        lstm_pred.select("date", "target_class"), on=["date", "target_class"], how="inner"
+    ).drop_nulls("y")
+    persistence_pinball = pinball(shared["y"], shared["log_value"], 0.5)
 
-    assert rw_pinball > 0
-    assert 0.5 * rw_pinball <= lstm_pinball <= 2.0 * rw_pinball
+    assert persistence_pinball > 0
+    assert 0.5 * persistence_pinball <= lstm_pinball <= 2.0 * persistence_pinball
     # Monotone head: P10 > P50 can never happen.
     assert lstm_cross == 0.0
     assert (lstm_pred["p_0.1"] <= lstm_pred["p_0.5"]).all()

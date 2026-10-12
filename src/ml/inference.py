@@ -1,41 +1,39 @@
-"""Inference API for the exported XGBoost models."""
+"""Live quantile inference backed by the cached LSTM ensemble.
+
+The exported-XGBoost path was removed together with the tree baselines.
+:class:`FreightPredictor` now serves the five-seed monotone quantile LSTM
+(via :mod:`ml.predictions`) and can apply the trained Sugeno fuzzy layer
+(via :mod:`ml.fuzzy_calibration`).
+"""
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Final
 
 import polars as pl
-import xgboost as xgb
 
-from ml.baselines import CLASS_CODES, QUANTILES
 from ml.fuzzy_calibration import calibrate as fuzzy_calibrate
 
-REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
-MODELS_DIR: Final[Path] = REPO_ROOT / "src" / "data" / "models"
+#: Base quantile columns emitted by the cached LSTM ensemble.
+QUANTILE_COLS: Final[tuple[str, ...]] = ("p_0.1", "p_0.5", "p_0.9")
 
 
 class FreightPredictor:
-    """Wrapper to load and run predictions with the exported XGBoost models."""
-    
+    """Serve the cached LSTM quantile ensemble for a single horizon."""
+
     def __init__(self, h: int) -> None:
         self.h = h
-        self.model_path = MODELS_DIR / f"xgb_h{h}.ubj"
-        self.meta_path = MODELS_DIR / f"xgb_h{h}_features.json"
-        
-        if not self.model_path.exists() or not self.meta_path.exists():
-            raise FileNotFoundError(
-                f"Model or metadata for h={h} not found in {MODELS_DIR}. "
-                "Run `uv run export-models` first."
-            )
-        
-        self.booster = xgb.Booster()
-        self.booster.load_model(self.model_path)
-        
-        with open(self.meta_path, "r") as f:
-            self.feature_names = json.load(f)
-            
-        self.feature_types = ["c" if n == "target_class" else "q" for n in self.feature_names]
+        self._base: pl.DataFrame | None = None
+
+    def _base_predictions(self) -> pl.DataFrame:
+        """Base LSTM quantiles over the cached train/valid splits (lazy)."""
+        if self._base is None:
+            from ml.baselines import load_split
+            from ml.predictions import ensure_lstm_predictions
+
+            splits = {name: load_split(name) for name in ("train", "valid")}
+            mean_preds, _, _ = ensure_lstm_predictions(splits)
+            self._base = pl.concat([mean_preds[name][self.h] for name in splits])
+        return self._base
 
     def predict(
         self,
@@ -43,60 +41,25 @@ class FreightPredictor:
         history_df: pl.DataFrame | None = None,
         params: dict | None = None,
     ) -> pl.DataFrame:
-        """
-        Predict log returns and add back to `log_value` to get absolute predictions.
-        df must contain `target_class`, `date`, `log_value`, and all required features.
+        """Quantile predictions for the ``(date, target_class)`` rows of ``df``.
 
-        Parameters
-        ----------
-        df:         Feature DataFrame for the period to forecast.
-        history_df: Optional reference frame (base quantiles + realised outcomes)
-                    used by the Sugeno FIS to recompute causal inputs.
-        params:     Learned Sugeno parameters. Fuzzy calibration is applied only
-                    when *both* ``history_df`` and ``params`` are given; otherwise
-                    the raw quantiles are returned unchanged.
+        ``df`` supplies the row keys only; the quantiles come from the cached
+        LSTM ensemble, so the frame matches the ``date | target_class | h |
+        p_0.1 | p_0.5 | p_0.9`` contract. Sugeno calibration is applied only
+        when *both* ``history_df`` and ``params`` are given; otherwise the raw
+        base quantiles are returned unchanged.
         """
-        # Ensure target_class is properly encoded to integers
-        if df["target_class"].dtype == pl.String:
-            df_encoded = df.with_columns(
-                pl.col("target_class").replace_strict(CLASS_CODES).alias("target_class")
+        keys = df.select("date", "target_class").unique()
+        base = (
+            self._base_predictions()
+            .join(keys, on=["date", "target_class"], how="inner")
+            .select(
+                "date",
+                "target_class",
+                pl.lit(self.h).cast(pl.Int64).alias("h"),
+                *QUANTILE_COLS,
             )
-        else:
-            df_encoded = df
-            
-        # Extract features in the exact order expected by the model
-        try:
-            x_mat = df_encoded.select(self.feature_names).to_numpy()
-        except pl.exceptions.ColumnNotFoundError as e:
-            raise ValueError(f"Missing required features for h={self.h} prediction: {e}")
-            
-        dmatrix = xgb.DMatrix(
-            x_mat, 
-            feature_names=self.feature_names, 
-            feature_types=self.feature_types
         )
-        
-        preds = self.booster.predict(dmatrix)
-        
-        # Format the predictions similar to the training outputs
-        if len(QUANTILES) == 1:
-            preds = preds.reshape(-1, 1)
-            
-        log_val = df["log_value"].to_numpy()
-        
-        exprs = [
-            pl.col("date"), 
-            pl.col("target_class"),
-            pl.lit(self.h).cast(pl.Int64).alias("h")
-        ]
-        
-        for i, q in enumerate(QUANTILES):
-            p_q = log_val + preds[:, i]
-            exprs.append(pl.lit(p_q).alias(f"p_{q}"))
-            
-        raw_pred = df.select(*exprs)
-
-        # Apply Sugeno FIS calibration only when both history and parameters are given.
         if history_df is not None and params is not None:
-            return fuzzy_calibrate(raw_pred, history_df, self.h, params)
-        return raw_pred
+            return fuzzy_calibrate(base, history_df, self.h, params)
+        return base

@@ -36,6 +36,7 @@ import itertools
 import json
 import logging
 import math
+from datetime import date
 from pathlib import Path
 from typing import Final
 
@@ -48,16 +49,42 @@ REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 FIG_DIR: Final[Path] = REPO_ROOT / "docs" / "figures"
 PARAM_DIR: Final[Path] = REPO_ROOT / "src" / "data" / "fuzzy_params"
 
-#: Bound on the log width multiplier: exp(m) in [exp(-M), exp(M)].
+#: Bound on the log width multiplier: exp(m) in [exp(-M), exp(M)]. The width
+#: multiplier is dimensionless (a log-multiplier on the base interval), so it
+#: needs no horizon scaling.
 M_SCALE: Final[float] = 0.7
-#: Bound on the location shift in log-return space.
-S_SCALE: Final[float] = 0.15
-#: Rolling window length (in matured forecasts) for cov_gap / bias_z.
+#: Location bound is a fixed multiple of the horizon's target standard
+#: deviation, so it is comparable across horizons. ``S_SCALE_PER_SD`` is set
+#: from the pre-registered h=1 bound (0.15 ~= 2.2 x the h=1 target SD of
+#: 0.068); a constant 0.15 was 2.2 x the h=1 SD but only 0.28 x the h=90 SD.
+S_SCALE_PER_SD: Final[float] = 2.20
+#: Rolling window length (in matured forecasts) for cov_gap / bias_z at h=1.
 N_MATURED: Final[int] = 60
 #: Minimum matured rows before cov_gap / bias_z are considered usable.
 MIN_MATURED: Final[int] = 5
+#: Number of non-overlapping (independent-ish) residuals the matured window
+#: should span. At h=90 a 60-row window holds only ~1 such observation, so the
+#: window is widened to ``N_MATURED_INDEPENDENT * h``.
+N_MATURED_INDEPENDENT: Final[int] = 5
 #: Trailing window (days) for the volatility input.
 VOL_WINDOW: Final[int] = 14
+
+
+def matured_window(h: int) -> int:
+    """Rolling matured-residual window for horizon ``h``.
+
+    Overlapping h-step residuals carry roughly one independent observation per
+    ``h`` rows, so a fixed 60-row window spans ~60/h independent observations:
+    ~5 at h=7 but only ~0.7 at h=90. Widening the window to ``5 * h`` keeps
+    the effective sample roughly constant across horizons.
+    """
+    return max(N_MATURED, N_MATURED_INDEPENDENT * h)
+
+
+def location_shift_bound(scale: float) -> float:
+    """Location-shift bound for a horizon whose target SD is ``scale``."""
+    bound = S_SCALE_PER_SD * float(scale)
+    return bound if math.isfinite(bound) and bound > 0 else 0.15
 
 FuzzyParams = dict[str, object]
 
@@ -69,9 +96,10 @@ FuzzyParams = dict[str, object]
 def compute_fuzzy_inputs(
     frame: pl.DataFrame,
     h: int,
-    n_matured: int = N_MATURED,
+    n_matured: int | None = None,
     vol_window: int = VOL_WINDOW,
     min_matured: int = MIN_MATURED,
+    matured_from: date | None = None,
 ) -> pl.DataFrame:
     """Per-row causal fuzzy inputs: ``vol_z``, ``cov_gap``, ``bias_z``.
 
@@ -79,7 +107,14 @@ def compute_fuzzy_inputs(
     p_0.9, y``. ``y`` is the realised h-step level for the issue date on that
     row, i.e. the outcome that matures ``h`` days later. A row at date ``t``
     only sees rows with ``date <= t - h``.
+
+    ``n_matured`` defaults to :func:`matured_window` for ``h``. Pass
+    ``matured_from`` to add a burn-in: matured residuals from before that date
+    (e.g. in-sample train residuals when calibrating on valid) are ignored, so
+    the first rows with too few out-of-sample outcomes fall back to the
+    identity window and contribute no cov_gap / bias_z signal.
     """
+    n_matured = matured_window(h) if n_matured is None else n_matured
     rows: list[dict[str, object]] = []
     for cls_frame in frame.sort(["target_class", "date"]).partition_by("target_class", maintain_order=True):
         cls = str(cls_frame["target_class"][0])
@@ -122,11 +157,16 @@ def compute_fuzzy_inputs(
         below = np.where(np.isnan(yv), np.nan, (yv < p10).astype(float))
         above = np.where(np.isnan(yv), np.nan, (yv > p90).astype(float))
         resid = yv - p50
+        floor = (
+            int(np.searchsorted(dates, np.datetime64(matured_from), side="left"))
+            if matured_from is not None
+            else 0
+        )
 
         for i in range(n):
             cutoff = dates[i] - np.timedelta64(h, "D")
             j = int(np.searchsorted(dates, cutoff, side="right"))
-            lo = max(0, j - n_matured)
+            lo = max(floor, j - n_matured)
             count = j - lo
             cov_gap = 0.0
             bias_z = 0.0
@@ -210,13 +250,14 @@ def calibrate(
     history_df: pl.DataFrame,
     h: int,
     params: FuzzyParams,
+    matured_from: date | None = None,
 ) -> pl.DataFrame:
     """Apply the trained Sugeno FIS to raw quantiles. numpy-only.
 
     Same schema and row order as ``pred_df``. ``history_df`` must contain the
     base quantiles and realised outcomes used to recompute causal inputs.
     """
-    inputs = compute_fuzzy_inputs(history_df, h)
+    inputs = compute_fuzzy_inputs(history_df, h, matured_from=matured_from)
     joined = pred_df.join(
         inputs.select("date", "target_class", "vol_z", "cov_gap", "bias_z"),
         on=["date", "target_class"],
@@ -336,13 +377,16 @@ def fit_fuzzy(
     epochs: int = 600,
     lr: float = 0.05,
     seed: int = 0,
+    matured_from: date | None = None,
 ) -> tuple[FuzzyParams, dict[str, object]]:
     """Train the fuzzy parameters on ``train_frame`` (base quantiles frozen).
 
     ``context_frame`` is the history+split frame (base quantiles and matured
     outcomes) from which causal inputs are computed. ``train_frame`` selects
     the rows to fit on. ``with_vol=False`` drops the volatility input from both
-    systems (ablation).
+    systems (ablation); at h >= 30 the width system is volatility-only, so that
+    arm then receives no width input at all. ``matured_from`` forwards a
+    burn-in to :func:`compute_fuzzy_inputs`.
     """
     import torch
 
@@ -350,7 +394,7 @@ def fit_fuzzy(
 
     set_seed(seed)
 
-    inputs_all = compute_fuzzy_inputs(context_frame, h)
+    inputs_all = compute_fuzzy_inputs(context_frame, h, matured_from=matured_from)
     train = train_frame.join(
         inputs_all.select("date", "target_class", "vol_z", "cov_gap", "bias_z"),
         on=["date", "target_class"],
@@ -366,12 +410,16 @@ def fit_fuzzy(
     bias = np.nan_to_num(train["bias_z"].to_numpy().astype(float))
     mapping = {"vol_z": vol, "cov_gap": cov, "bias_z": bias}
 
-    width_cols = ([] if not use_width else (["cov_gap", "vol_z"] if with_vol else ["cov_gap"]))
-    # cov_gap is only usable at h=1 and h=7 (at h>=30 few forecasts mature
-    # inside the split), so the width system becomes volatility-only there.
-    if use_width and h >= 30:
-        width_cols = ["vol_z"]
-    loc_cols = ([] if not use_loc else (["bias_z", "vol_z"] if with_vol else ["bias_z"]))
+    width_cols = []
+    if use_width:
+        # cov_gap needs enough matured forecasts inside the split, so it is only
+        # used at h < 30; at h >= 30 the width system is volatility-only. The
+        # no-volatility arm then removes the width input entirely rather than
+        # silently keeping it (which made ``novol`` identical to ``both`` there).
+        width_cols = ["cov_gap"] if h < 30 else []
+        if with_vol:
+            width_cols = width_cols + ["vol_z"]
+    loc_cols = (["bias_z"] + (["vol_z"] if with_vol else [])) if use_loc else []
 
     base = np.stack([
         train["p_0.1"].to_numpy().astype(float) - train["log_value"].to_numpy().astype(float),
@@ -390,9 +438,14 @@ def fit_fuzzy(
     xw, w_mean, w_std = _norm(width_cols)
     xl, l_mean, l_std = _norm(loc_cols)
 
+    # Location bound is horizon-scaled to the calibration frame's target SD so
+    # that the h=1 and h=90 systems are allowed comparable moves relative to
+    # the quantity they are shifting.
+    s_scale = location_shift_bound(float(np.nanstd(y_ret)))
+
     device = torch.device("cpu")
     width_fis = _sugeno_torch(len(width_cols), 3, linear, M_SCALE, True).to(device) if width_cols else None
-    loc_fis = _sugeno_torch(len(loc_cols), 3, linear, S_SCALE, True).to(device) if loc_cols else None
+    loc_fis = _sugeno_torch(len(loc_cols), 3, linear, s_scale, True).to(device) if loc_cols else None
 
     params = []
     if width_fis is not None:
@@ -431,7 +484,7 @@ def fit_fuzzy(
     }
     loc_spec = _spec_from_torch(loc_fis, loc_cols, l_mean, l_std) if loc_fis is not None else {
         "inputs": [], "centers": [], "widths": [], "consequents": [],
-        "linear_coefs": None, "output_scale": S_SCALE, "bounded": True, "n_mfs": 3,
+        "linear_coefs": None, "output_scale": s_scale, "bounded": True, "n_mfs": 3,
         "norm_mean": [], "norm_std": [],
     }
 
@@ -439,9 +492,11 @@ def fit_fuzzy(
     stats = {
         "h": h,
         "n_train": n,
+        "n_matured_window": matured_window(h),
         "n_matured_median": float(n_matured["n_matured"].median()),
         "n_matured_mean": float(n_matured["n_matured"].mean()),
         "frac_rows_with_matured": float((n_matured["n_matured"] >= MIN_MATURED).mean()),
+        "s_scale": s_scale,
         "final_train_pinball": float(loss.item()),
         "width_inputs": width_cols,
         "loc_inputs": loc_cols,

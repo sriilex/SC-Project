@@ -177,38 +177,6 @@ def pinball_loss(
     return loss.mean()
 
 
-def huber_pinball_loss(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-    delta: float | None = None,
-    quantiles: tuple[float, ...] = QUANTILES,
-) -> torch.Tensor:
-    """Huber-smoothed pinball loss.
-
-    ``delta=None`` (the default and the training default) returns the exact
-    pinball loss. A finite ``delta`` smooths it, but the caller must keep
-    ``delta`` small relative to the target scale: the old default
-    ``delta=0.05`` was ~70% of the h=1 target std (0.069), which turned the
-    loss into an expectile loss and shrank the outer quantiles toward P50.
-    """
-    if delta is None:
-        return pinball_loss(pred, target, quantiles)
-
-    target = target.unsqueeze(1)
-    err = target - pred
-    q = torch.tensor(quantiles, device=pred.device, dtype=pred.dtype).unsqueeze(0)
-
-    abs_err = torch.abs(err)
-    quadratic = torch.clamp(abs_err, max=delta)
-    linear = abs_err - quadratic
-    huber = 0.5 * (quadratic ** 2) + delta * linear
-    huber_scaled = huber / delta
-
-    weights = torch.where(err >= 0, q, 1.0 - q)
-    loss = weights * huber_scaled
-    return loss.sum(dim=-1).mean()
-
-
 def add_target_returns(df: pl.DataFrame, horizons: list[int]) -> pl.DataFrame:
     """Append raw-scale h-step log-return targets ``y_step_h{h} - log_value``.
 
@@ -573,7 +541,7 @@ class LSTMModel:
                     by = by.to(device)
                     optimizer.zero_grad()
                     pred = model(b_seq, b_cross, bc)
-                    loss = huber_pinball_loss(pred, by)
+                    loss = pinball_loss(pred, by)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     optimizer.step()
@@ -583,7 +551,7 @@ class LSTMModel:
                 with torch.no_grad():
                     if len(seq_es) > 0:
                         pred_es = model(seq_es, cross_es, c_es)
-                        val_loss = huber_pinball_loss(pred_es, y_es).item()
+                        val_loss = pinball_loss(pred_es, y_es).item()
                     else:
                         val_loss = 0.0
 

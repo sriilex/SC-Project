@@ -42,9 +42,6 @@ PAPER_MODELS: Final[tuple[str, ...]] = (
     "lstm_fuzzy",
     "cqr",
     "aci",
-    "ar1",
-    "xgb",
-    "rw_emp",
 )
 
 #: Human-readable labels.
@@ -56,11 +53,6 @@ MODEL_LABELS: Final[dict[str, str]] = {
     "cqr": "CQR",
     "aci": "ACI",
     "const_shift": "Const. shift",
-    "ar1": "AR(1)",
-    "xgb": "XGBoost",
-    "lgbm": "LightGBM",
-    "rw": "Random walk",
-    "rw_emp": "RW (empirical)",
 }
 
 CALIBRATED_MODELS: Final[tuple[str, ...]] = (

@@ -36,7 +36,7 @@ use `matplotlib`, which lives in the `dev` dependency group and is installed by
 | **Results & Significance** | Main table, metric bars, DM forest plots with bootstrap intervals, ablation heatmap, robustness. |
 | **Fuzzy Rule Lab** | Learn/see/edit the Sugeno systems; membership curves and rule surfaces; a what-if scanner for a single forecast; live re-scoring of a whole split. |
 | **Run Pipeline** | Stream the project's CLI steps, and refit the fuzzy layer in-process with custom hyperparameters. |
-| **Playground** | Live XGBoost inference on a chosen date/class, a manual fuzzy calculator, and a baseline ↔ calibrator comparison. |
+| **Playground** | Live neural inference on a chosen date/class, a manual fuzzy calculator, and a baseline ↔ calibrator comparison. |
 
 ## Data and the frozen-test rule
 

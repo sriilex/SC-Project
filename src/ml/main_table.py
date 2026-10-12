@@ -2,8 +2,7 @@
 
 Reads ``baseline_metrics_common.csv`` (produced by ``ml.baselines``) so every
 model is scored on exactly the same rows, and writes a compact markdown table
-for the paper. Skill is pinball divided by the ``rw_emp`` pinball at the same
-horizon (lower is better; 0.7 means 30% lower loss than historical simulation).
+for the paper.
 """
 from __future__ import annotations
 
@@ -17,7 +16,7 @@ LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 DATA: Final[Path] = REPO_ROOT / "src" / "data"
 
-MODELS: Final[tuple[str, ...]] = ("lstm", "lstm_fuzzy", "cqr", "aci", "ar1", "xgb", "rw_emp")
+MODELS: Final[tuple[str, ...]] = ("lstm", "lstm_fuzzy", "cqr", "aci")
 CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax", "Handysize")
 
 
@@ -32,11 +31,9 @@ def _load(scope: str) -> pl.DataFrame:
 
 def pooled_table() -> tuple[pl.DataFrame, list[str]]:
     m = _load("POOLED")
-    ref = m.filter(pl.col("model") == "rw_emp").select("h", pl.col("pinball_mean").alias("rw"))
-    m = m.join(ref, on="h", how="left").with_columns((pl.col("pinball_mean") / pl.col("rw")).alias("skill"))
     lines = [
-        "| h | model | n | mean pinball | skill vs rw_emp | cover-80 | Winkler-80 |",
-        "|---|-------|---|--------------|-----------------|----------|------------|",
+        "| h | model | n | mean pinball | cover-80 | Winkler-80 |",
+        "|---|-------|---|--------------|----------|------------|",
     ]
     for h in (1, 7, 30, 90):
         sub = m.filter(pl.col("h") == h)
@@ -47,9 +44,9 @@ def pooled_table() -> tuple[pl.DataFrame, list[str]]:
             row = r.row(0, named=True)
             lines.append(
                 f"| {h} | {model} | {row['n']:.0f} | {_fmt(row['pinball_mean'])} | "
-                f"{_fmt(row['skill'], 3)} | {_fmt(row['cover_80'], 4)} | {_fmt(row['winkler_80'], 4)} |"
+                f"{_fmt(row['cover_80'], 4)} | {_fmt(row['winkler_80'], 4)} |"
             )
-    return m.select("h", "model", "n", "pinball_mean", "skill", "cover_80", "winkler_80"), lines
+    return m.select("h", "model", "n", "pinball_mean", "cover_80", "winkler_80"), lines
 
 
 def h90_by_class() -> list[str]:
@@ -58,26 +55,19 @@ def h90_by_class() -> list[str]:
         (pl.col("split") == "test") & (pl.col("h") == 90)
         & (pl.col("model").is_in(MODELS)) & (pl.col("scope").is_in(CLASSES))
     )
-    ref = full.filter(
-        (pl.col("split") == "test") & (pl.col("h") == 90)
-        & (pl.col("model") == "rw_emp") & (pl.col("scope").is_in(CLASSES))
-    ).select("scope", pl.col("pinball_mean").alias("rw"))
     lines = [
-        "| class | model | n | mean pinball | skill vs rw_emp (class) | cover-80 | Winkler-80 |",
-        "|-------|-------|---|--------------|--------------------------|----------|------------|",
+        "| class | model | n | mean pinball | cover-80 | Winkler-80 |",
+        "|-------|-------|---|--------------|----------|------------|",
     ]
     for cls in CLASSES:
-        rw_row = ref.filter(pl.col("scope") == cls)
-        rw = float(rw_row["rw"][0]) if rw_row.height else None
         for model in MODELS:
             r = by.filter((pl.col("scope") == cls) & (pl.col("model") == model))
             if r.is_empty():
                 continue
             row = r.row(0, named=True)
-            skill = None if rw in (None, 0) else row["pinball_mean"] / rw
             lines.append(
                 f"| {cls} | {model} | {row['n']:.0f} | {_fmt(row['pinball_mean'])} | "
-                f"{_fmt(skill, 3)} | {_fmt(row['cover_80'], 4)} | {_fmt(row['winkler_80'], 4)} |"
+                f"{_fmt(row['cover_80'], 4)} | {_fmt(row['winkler_80'], 4)} |"
             )
     return lines
 
@@ -91,8 +81,7 @@ def main() -> None:
         "",
         (
             "All models are scored on the intersection of rows where every model emitted a "
-            "prediction (the LSTM needs a warm-up window). Skill = pinball / rw_emp pinball "
-            "at the same horizon; lower is better."
+            "prediction (the LSTM needs a warm-up window). Lower pinball is better."
         ),
         "",
         *lines,

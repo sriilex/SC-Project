@@ -8,7 +8,8 @@ run it under identical conditions, and compare it fairly against what exists.
 ```
 uv sync                  # install deps into .venv
 uv run build-master      # data_raw/* -> data/master_long.parquet (tidy long table)
-uv run baselines         # trains rw/ar1/lgbm on sample splits, writes data/baseline_metrics.csv
+uv run baselines         # trains the quantile LSTM + fuzzy/conformal calibration layers,
+                         # writes data/baseline_metrics.csv
 ```
 
 Data flow:
@@ -18,7 +19,7 @@ data_raw/  ->  master_long.parquet  ->  samples_{train,valid,test}.parquet  ->  
 ```
 
 Sample splits are FIXED. Never regenerate them for an experiment.
-train <= 2022-07-25 | valid 2023-01-03..2024-07-25 | test 2025-01-02..2026-04-14
+train <= 2022-07-25 | valid 2023-01-03..2024-07-25 | test 2025-01-02..2026-08-20
 (~5 month embargo gaps, larger than any lookback + horizon we use.)
 
 ## The samples table (input contract)
@@ -27,7 +28,7 @@ One row = (target_class, date t). 40 columns:
 
 - keys: `date` (Date), `target_class` (str: Capesize/Panamax/Supramax/Handysize)
 - target level: `log_value` = ln(TCE $/day) at t
-- targets: `y_step_h7`, `y_step_h30`, `y_step_h90` = log levels at t+h (calendar-day horizons,
+- targets: `y_step_h1`, `y_step_h7`, `y_step_h30`, `y_step_h90` = log levels at t+h (calendar-day horizons,
   resolved to next available trading day)
 - features: lags (`lag_1..lag_63`), rolling stats (30d/90d mean/std/zscore),
   returns (`ret_1/7/30`), calendar (`dayofweek, month, weekofyear,
@@ -38,7 +39,7 @@ One row = (target_class, date t). 40 columns:
 
 Known quirks: NaNs exist in train (normalized to null by `load_split`);
 some cross-class ret columns are all-null in train (sparse source history).
-Nulls are fine for LightGBM; neural nets need explicit handling (see below).
+Nulls need explicit handling by the neural pipeline (which drops or imputes them).
 
 ## Prediction contract
 
@@ -49,7 +50,7 @@ date | target_class | h | p_0.1 | p_0.5 | p_0.9     <- LOG-LEVEL space
 ```
 
 i.e., predictions of ln(TCE) at t+h. If your model predicts log-returns,
-add `log_value` back before evaluation (see `predict_lgbm`).
+add `log_value` back before evaluation.
 
 Anything that emits those frames plugs into the existing evaluator:
 `ml.baselines.evaluate(pred, source_df, split_name, model_name)` computes
@@ -66,17 +67,18 @@ pinball@10/50/90, median MAE, and directional hit-rate, pooled and per class.
    valid/test (per-class stats where relevant, since classes live on
    different TCE scales).
 4. Report against the reference table below. A model "wins" only if it beats
-   ALL of rw/ar1/lgbm on pinball_0.5 for its horizon, pooled AND per class.
-   Directional hit-rate is reported but secondary.
+   the raw LSTM and the conformal calibration baselines (CQR, ACI) on pooled
+   pinball for its horizon. Directional hit-rate is reported but secondary.
 5. Keep seeds fixed and logged. Determinism > vibes.
 
-Reference numbers to beat (valid, pooled, pinball_0.5 / dir_hit):
+Reference numbers to beat (valid, pooled, mean pinball / directional hit-rate):
 
-| h  | rw          | ar1          | lgbm         | lgbm_tuned   | xgb          | lstm         |
-|----|-------------|--------------|--------------|--------------|--------------|--------------|
-| 7  | 0.117 / 50% | 0.115 / 53%  | 0.107 / 59%  | 0.108 / 60%  | 0.108 / 61%  | 0.108 / 47%  |
-| 30 | 0.210 / 46% | 0.185 / 58%  | 0.213 / 52%  | 0.201 / 57%  | 0.188 / 55%  | 0.160 / 47%  |
-| 90 | 0.212 / 41% | 0.215 / 67%  | 0.169 / 69%  | 0.165 / 70%  | 0.165 / 70%  | 0.292 / 44%  |
+| h  | lstm                     | lstm_fuzzy               | cqr                      | aci                      |
+|----|--------------------------|--------------------------|--------------------------|--------------------------|
+| 1  | 0.00770 / 0.726          | 0.00750 / 0.722          | 0.00769 / 0.721          | 0.00767 / 0.726          |
+| 7  | 0.02610 / 0.678          | 0.02478 / 0.692          | 0.02606 / 0.672          | 0.02610 / 0.678          |
+| 30 | 0.06065 / 0.561          | 0.05185 / 0.609          | 0.06031 / 0.597          | 0.05919 / 0.561          |
+| 90 | 0.07188 / 0.711          | 0.05109 / 0.704          | 0.06886 / 0.687          | 0.06560 / 0.711          |
 
 ## Wiring a new model in
 

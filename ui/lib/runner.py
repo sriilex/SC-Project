@@ -49,7 +49,7 @@ STEPS: dict[str, Step] = {
         args=("-m", "ml.interval_diagnostics"),
         description=(
             "Coverage, width, quantile crossings and per-quantile pinball for the "
-            "base LSTM and random-walk baselines on train/valid."
+            "base LSTM on train/valid."
         ),
         outputs=_out("interval_diagnostics.csv", "interval_diagnostics_common.csv"),
     ),
@@ -60,25 +60,18 @@ STEPS: dict[str, Step] = {
         description="Compares the main run against the 7-day congestion-lag rebuild on valid.",
         outputs=_out("robustness_metrics.csv", "robustness_summary.md"),
     ),
-    "export": Step(
-        key="export",
-        label="Export XGBoost inference models",
-        args=("-m", "ml.export"),
-        description="Writes src/data/models/xgb_h*.ubj plus feature lists used by the playground.",
-        outputs=_out("models"),
-    ),
     "baselines_lstm": Step(
         key="baselines_lstm",
-        label="Re-run baselines: LSTM + calibrators only",
+        label="Re-run baselines: LSTM + calibrators",
         args=("-m", "ml.baselines"),
         description=(
             "Trains/caches the LSTM ensemble and scores lstm, lstm_fuzzy, cqr, aci, "
-            "const_shift, rw, rw_emp, ar1. Skips XGBoost/LightGBM. Writes "
-            "baseline_metrics.csv and baseline_dm.csv. This is the slow step."
+            "const_shift. Writes baseline_metrics.csv and baseline_dm.csv. "
+            "This is the slow step."
         ),
         heavy=True,
         outputs=_out("baseline_metrics.csv", "baseline_dm.csv", "baseline_summary.md"),
-        env={"BASELINES_MODELS": "lstm,lstm_fuzzy,cqr,aci,const_shift,rw,rw_emp,ar1"},
+        env={"BASELINES_MODELS": "lstm,lstm_fuzzy,cqr,aci,const_shift"},
     ),
     "baselines_test": Step(
         key="baselines_test",
@@ -94,7 +87,7 @@ STEPS: dict[str, Step] = {
             "baseline_metrics.csv", "baseline_metrics_common.csv", "baseline_dm.csv"
         ),
         env={
-            "BASELINES_MODELS": "lstm,lstm_fuzzy,cqr,aci,const_shift,rw,rw_emp,ar1",
+            "BASELINES_MODELS": "lstm,lstm_fuzzy,cqr,aci,const_shift",
             "BASELINES_INCLUDE_TEST": "1",
         },
     ),

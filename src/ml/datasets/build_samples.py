@@ -25,6 +25,51 @@ from ml.features import (
 LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 
+#: Names for ISO weekdays (Polars ``dt.weekday()`` is 1=Monday .. 7=Sunday).
+WEEKDAY_NAMES: Final[tuple[str, ...]] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def weekday_composition(
+    frame: pl.DataFrame, split_name: str, horizons: list[int]
+) -> pl.DataFrame:
+    """Weekday mix of each horizon's evaluation mask.
+
+    Horizons are defined as *calendar-day* shifts (``y_step_h{h}``) and then
+    masked to rows whose target date is a real trading date. Because a fixed
+    calendar offset maps a weekday onto itself only when ``h % 7 == 0``, each
+    horizon keeps a different, weekday-biased subset of the valid rows. This
+    table makes that bias explicit: for every split and horizon it reports the
+    number of retained rows, the number of retained dates and the row count per
+    weekday, alongside the share of the split's valid rows that survive.
+
+    A trading-day definition (shift by ``h`` *published* dates instead of ``h``
+    calendar days) would remove the bias; it is reported here rather than
+    applied because switching it would invalidate the frozen modelling
+    artefacts. It is stated as a limitation in the report.
+    """
+    rows: list[dict[str, object]] = []
+    base_rows = frame.height
+    for h in horizons:
+        mask = frame.drop_nulls([f"y_step_h{h}"])
+        counts = {name: 0 for name in WEEKDAY_NAMES}
+        if mask.height:
+            grouped = (
+                mask.with_columns(pl.col("date").dt.weekday().alias("wd"))
+                .group_by("wd")
+                .agg(pl.len().alias("n"))
+            )
+            for wd, n in grouped.iter_rows():
+                counts[WEEKDAY_NAMES[int(wd) - 1]] = int(n)
+        rows.append({
+            "split": split_name,
+            "h": h,
+            "n_rows": mask.height,
+            "n_dates": mask["date"].n_unique() if mask.height else 0,
+            "retained_frac_of_valid_rows": (mask.height / base_rows) if base_rows else 0.0,
+            **counts,
+        })
+    return pl.DataFrame(rows)
+
 
 def _setup_logging() -> None:
     """Configure root logging once for CLI runs."""
@@ -240,6 +285,13 @@ def main() -> None:
     counts = counts.join(test_counts, on="target_class", how="outer_coalesce")
     
     LOGGER.info(f"Row counts per class:\n{counts}")
+
+    weekday_rows = []
+    for split_name, split_df in (("train", train_df), ("valid", valid_df), ("test", test_df)):
+        weekday_rows.append(weekday_composition(split_df, split_name, horizons))
+    weekday_path = out_dir / "samples_weekday_composition.csv"
+    pl.concat(weekday_rows).write_csv(weekday_path)
+    LOGGER.info(f"Wrote weekday composition: {weekday_path}")
     
     feat_cols = []
     feat_cols.extend(LagsFeature(lags).feature_names_out())

@@ -1,10 +1,16 @@
 """Evaluation statistics for the quantile forecast comparison (Task G).
 
+* Per-row pinball losses via ``scoringrules.quantile_score``.
 * Diebold-Mariano tests on pinball-loss differentials with a Newey-West HAC
-  variance at lag ``h - 1``.
-* A moving-block bootstrap confidence interval for the mean pinball difference,
-  because 90-day windows overlap and the four vessel classes are highly
-  correlated, so effective sample sizes are much smaller than the row count.
+  variance at lag ``h - 1`` (``statsmodels`` HAC standard errors, Bartlett
+  kernel).
+* A moving-block bootstrap confidence interval for the mean pinball difference
+  (``arch.bootstrap.MovingBlockBootstrap``), because 90-day windows overlap and
+  the four vessel classes are highly correlated, so effective sample sizes are
+  much smaller than the row count. The *reported* interval uses
+  :func:`date_cluster_bootstrap_ci`, which resamples whole dates so that the
+  four same-date classes move together; the moving-block interval is retained
+  as a robustness check.
 * A short markdown summary writer.
 """
 from __future__ import annotations
@@ -15,6 +21,9 @@ from typing import Final
 
 import numpy as np
 import polars as pl
+import scoringrules as sr
+from arch.bootstrap import MovingBlockBootstrap
+from statsmodels.regression.linear_model import OLS
 
 QUANTILES: Final[tuple[float, ...]] = (0.1, 0.5, 0.9)
 
@@ -50,30 +59,28 @@ def aligned_losses(
         if q is None:
             acc = np.zeros(j.height)
             for qq in QUANTILES:
-                err = y - j[f"{prefix}p_{qq}"].to_numpy()
-                acc += np.maximum(qq * err, (qq - 1.0) * err)
+                acc += sr.quantile_score(y, j[f"{prefix}p_{qq}"].to_numpy(), qq)
             return acc / len(QUANTILES)
-        err = y - j[f"{prefix}p_{q}"].to_numpy()
-        return np.maximum(q * err, (q - 1.0) * err)
+        return np.asarray(sr.quantile_score(y, j[f"{prefix}p_{q}"].to_numpy(), q))
 
     return _losses(""), _losses("b_"), j
 
 
 def newey_west_se(d: np.ndarray, lag: int) -> float:
-    """HAC (Newey-West) standard error of the mean of ``d``."""
+    """HAC (Newey-West, Bartlett kernel) standard error of the mean of ``d``.
+
+    ``statsmodels`` HAC standard error of a constant-only regression
+    (``use_correction=False``, i.e. the plain ``S / T`` variance). The removed
+    hand-rolled loop divided each cross term by ``T - k`` instead of ``T``.
+    """
     T = d.size
     if T < 2:
         return float("nan")
-    dbar = d.mean()
-    e = d - dbar
-    gamma0 = float(np.mean(e * e))
-    var = gamma0
-    for k in range(1, max(lag, 0) + 1):
-        w = 1.0 - k / (lag + 1.0)
-        cov = float(np.mean(e[k:] * e[:-k]))
-        var += 2.0 * w * cov
-    var = max(var, 0.0)
-    return math.sqrt(var / T)
+    fit = OLS(d, np.ones(T)).fit(
+        cov_type="HAC",
+        cov_kwds={"maxlags": max(lag, 0), "use_correction": False},
+    )
+    return float(fit.bse[0])
 
 
 def dm_test(loss_a: np.ndarray, loss_b: np.ndarray, h: int) -> dict[str, float]:
@@ -93,19 +100,57 @@ def block_bootstrap_ci(
     n_boot: int = 2000,
     seed: int = 0,
 ) -> dict[str, float]:
-    """Moving-block bootstrap CI for the mean of a dependent differential series."""
+    """Moving-block bootstrap CI for the mean of a dependent differential series.
+
+    ``arch.bootstrap.MovingBlockBootstrap``: ``ceil(T / block)`` blocks of
+    ``block`` consecutive observations, starts uniform on ``[0, T - block]``,
+    truncated to ``T``. Same scheme and generator seeding as the removed loop,
+    so results are unchanged for a given ``seed``.
+    """
     T = d.size
     if T < 5:
         return {"boot_lo": float("nan"), "boot_hi": float("nan"), "boot_mean": float("nan")}
     block = block or max(T // 20, 5)
     block = min(block, T)
+    boot = MovingBlockBootstrap(block, d, seed=seed)
+    means = np.asarray(boot.apply(lambda x: np.mean(x), reps=n_boot)).ravel()
+    return {
+        "boot_lo": float(np.quantile(means, 0.025)),
+        "boot_hi": float(np.quantile(means, 0.975)),
+        "boot_mean": float(means.mean()),
+    }
+
+
+def date_cluster_bootstrap_ci(
+    d: np.ndarray,
+    dates: np.ndarray,
+    n_boot: int = 2000,
+    seed: int = 0,
+) -> dict[str, float]:
+    """Cluster bootstrap CI resampling whole dates (not rows).
+
+    Every row sharing a date forms one cluster, so the four vessel-class
+    residuals on the same day enter and leave the resample together. This
+    removes the cross-class same-date correlation that the row-level
+    moving-block bootstrap ignores; overlapping multi-day targets are still
+    only partially handled, so the interval remains a lower bound on the true
+    uncertainty (effective sample is much smaller than the row count).
+    """
+    d = np.asarray(d, dtype=float)
+    dates = np.asarray(dates)
+    if d.size < 5 or d.size != dates.size:
+        return {"boot_lo": float("nan"), "boot_hi": float("nan"), "boot_mean": float("nan")}
+    _, inv = np.unique(dates, return_inverse=True)
+    n_dates = int(inv.max()) + 1 if inv.size else 0
+    if n_dates < 2:
+        return {"boot_lo": float("nan"), "boot_hi": float("nan"), "boot_mean": float("nan")}
+    groups = [np.flatnonzero(inv == k) for k in range(n_dates)]
     rng = np.random.default_rng(seed)
-    n_blocks = math.ceil(T / block)
     means = np.empty(n_boot)
     for i in range(n_boot):
-        starts = rng.integers(0, T - block + 1, size=n_blocks)
-        sample = np.concatenate([d[s : s + block] for s in starts])[:T]
-        means[i] = sample.mean()
+        pick = rng.integers(0, n_dates, size=n_dates)
+        idx = np.concatenate([groups[k] for k in pick])
+        means[i] = d[idx].mean()
     return {
         "boot_lo": float(np.quantile(means, 0.025)),
         "boot_hi": float(np.quantile(means, 0.975)),
@@ -142,10 +187,17 @@ def write_markdown_summary(
             )
         lines.append("")
     if dm.height:
-        lines.append("## Diebold-Mariano vs lstm_fuzzy (pinball, HAC lag h-1)")
+        lines.append("## Diebold-Mariano vs lstm_fuzzy (pinball, HAC lag h-1) — appendix-only")
         lines.append("")
-        lines.append("| split | h | competitor | quantile | mean diff | DM stat | p | boot 2.5% | boot 97.5% |")
-        lines.append("|-------|---|------------|----------|-----------|---------|---|-----------|------------|")
+        lines.append(
+            "DM p-values are reported for completeness only. With overlapping 90-day "
+            "targets and four correlated classes the row count vastly overstates the "
+            "effective sample, so the date-cluster bootstrap interval is the primary "
+            "evidence and the DM test is demoted to this appendix."
+        )
+        lines.append("")
+        lines.append("| split | h | competitor | quantile | mean diff | DM stat | p | date-boot 2.5% | date-boot 97.5% |")
+        lines.append("|-------|---|------------|----------|-----------|---------|---|----------------|-----------------|")
         for r in dm.sort(["split", "h", "quantile", "competitor"]).iter_rows(named=True):
             lines.append(
                 f"| {r['split']} | {r['h']} | {r['competitor']} | {r['quantile']} | {r['dm_mean_diff']:+.5f} "

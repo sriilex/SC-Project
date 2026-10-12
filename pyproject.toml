@@ -4,15 +4,16 @@ version = "0.1.0"
 description = "Dry bulk charter forecasting pipeline (SIH 2026)"
 requires-python = ">=3.12"
 dependencies = [
-    "lightgbm>=4.7.0",
+    "arch>=8.0.0",
     "ortools>=9.15.6755",
     "polars>=1.0",
     "pydantic>=2.13.4",
     "scikit-learn>=1.9.0",
+    "scoringrules>=0.11.0",
+    "statsmodels>=0.15.0",
     "streamlit>=1.65.0",
     "timesfm[torch]>=3.0.0",
     "torch>=2.4.0",
-    "xgboost>=3.4.1",
 ]
 
 [build-system]
@@ -34,7 +35,6 @@ dev = [
 build-master = "data_prep.build_master:main"
 baselines = "ml.baselines:main"
 build-samples = "ml.datasets.build_samples:main"
-export-models = "ml.export:main"
 
 
 

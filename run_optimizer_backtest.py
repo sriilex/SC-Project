@@ -7,16 +7,17 @@ optimizer backtester.
 
 import polars as pl
 
-from ml.baselines import load_split
+from ml.frozen_test import allow_test_set_access, load_frozen_test
 from ml.inference import FreightPredictor
 from opt.backtest import simulate, summarise, to_dataframe
 
 
 def main():
-    print("Loading test split (Jan 2025 - Apr 2026)...")
-    test = load_split("test")
+    print("Loading frozen test split (Jan 2025 - Apr 2026)...")
+    with allow_test_set_access("optimizer decision-value backtest on the frozen test split"):
+        test = load_frozen_test()
 
-    print(f"Generating ML predictions for {test.height} rows using exported XGBoost models...")
+    print(f"Generating ML predictions for {test.height} rows using the cached LSTM ensemble...")
     # Load the pre-trained models and get predictions
     predictor_h7 = FreightPredictor(h=7)
     predictor_h30 = FreightPredictor(h=30)

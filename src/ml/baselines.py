@@ -1,17 +1,15 @@
 """Pooled quantile baselines over the sample splits.
 
 Benchmarks and calibration layers:
-  rw       persistence: point = last log level, bands from train RW residual std
-  rw_emp   random walk with per-class empirical return quantiles (historical sim)
-  ar1      pooled AR(1) with drift on log returns (momentum-aware median)
-  lgbm     pooled LightGBM quantile models (one per horizon x quantile)
-  xgb      pooled XGBoost quantile models
-  lstm     five-seed monotone quantile LSTM ensemble
+  lstm             five-seed monotone quantile LSTM ensemble
   lstm_fuzzy       new Sugeno layer (Task F)
   lstm_fuzzy_old   original constant-shift fuzzy layer (ablation)
   const_shift      raw LSTM + median residual shift (calibration split)
   cqr              split conformalized quantile regression
   aci              adaptive conformal inference / online quantile tracking
+
+A directional ``naive_sign`` diagnostic (persist sign(r_t)) is also reported;
+it is not a quantile forecaster.
 
 Each horizon is scored on its own mask (that horizon's target non-null and a
 prediction present). The harness only reads the frozen test split when
@@ -27,7 +25,9 @@ import os
 from pathlib import Path
 from typing import Final
 
+import numpy as np
 import polars as pl
+import scoringrules as sr
 
 from ml.conformal import (
     aci_adjust,
@@ -39,6 +39,7 @@ from ml.conformal import (
 from ml.evaluation import (
     aligned_losses,
     block_bootstrap_ci,
+    date_cluster_bootstrap_ci,
     dm_test,
     write_markdown_summary,
 )
@@ -53,23 +54,9 @@ REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 DATA: Final[Path] = REPO_ROOT / "src" / "data"
 HORIZONS: Final[tuple[int, ...]] = (1, 7, 30, 90)
 QUANTILES: Final[tuple[float, ...]] = (0.1, 0.5, 0.9)
-ZSCORES: Final[dict[float, float]] = {0.1: -1.2816, 0.5: 0.0, 0.9: 1.2816}
+#: Miscoverage level of the reported central interval (P10-P90, i.e. 80%).
+INTERVAL_ALPHA: Final[float] = 0.2
 CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax", "Handysize")
-CLASS_CODES: Final[dict[str, int]] = {c: i for i, c in enumerate(CLASSES)}
-EXCLUDE: Final[frozenset[str]] = frozenset(
-    {"date", "target_value", "log_value", "target_class"}
-    | {f"y_step_h{h}" for h in HORIZONS}
-    | {f"y_mean_h{h}" for h in HORIZONS}
-    | {f"target_ret_h{h}" for h in HORIZONS}
-)
-
-# Tree models keep the encoded class as a feature, so they exclude one column less.
-TREE_EXCLUDE: Final[frozenset[str]] = frozenset(
-    {"date", "target_value", "log_value"}
-    | {f"y_step_h{h}" for h in HORIZONS}
-    | {f"y_mean_h{h}" for h in HORIZONS}
-    | {f"target_ret_h{h}" for h in HORIZONS}
-)
 
 
 def _setup_logging() -> None:
@@ -100,11 +87,9 @@ def horizon_mask(df: pl.DataFrame, h: int) -> pl.DataFrame:
 
 
 def pinball(y: pl.Series, p: pl.Series, q: float) -> float:
-    """Mean pinball (quantile) loss for quantile level q."""
-    err = y - p
-    return float(
-        pl.select(pl.when(err >= 0).then(q * err).otherwise((q - 1.0) * err).mean()).item()
-    )
+    """Mean pinball (quantile) loss for quantile level q (``scoringrules.quantile_score``)."""
+    loss = sr.quantile_score(np.asarray(y), np.asarray(p), q)
+    return float(np.asarray(loss).mean())
 
 
 def _clean_sigma(s: object, fallback: float) -> float:
@@ -113,84 +98,6 @@ def _clean_sigma(s: object, fallback: float) -> float:
         return fallback
     s_f = float(s)
     return s_f if s_f == s_f and s_f > 0 else fallback
-
-
-def fit_rw_sigmas(train: pl.DataFrame, h: int) -> dict[str, float]:
-    """Per-class random-walk residual sigma on train, pooled fallback."""
-    res = train.select(
-        pl.col("target_class"),
-        (pl.col(f"y_step_h{h}") - pl.col("log_value")).alias("e"),
-    ).drop_nulls()
-    pooled = float(res["e"].std())
-    out = {
-        row["target_class"]: _clean_sigma(row["s"], pooled)
-        for row in res.group_by("target_class").agg(pl.col("e").std().alias("s"))
-        .iter_rows(named=True)
-    }
-    out["POOLED"] = pooled
-    return out
-
-
-def predict_rw(df: pl.DataFrame, h: int, sigmas: dict[str, float]) -> pl.DataFrame:
-    """Point + quantile columns for the persistence baseline."""
-    sigma = pl.col("target_class").replace_strict(sigmas, default=sigmas["POOLED"])
-    return df.select(
-        pl.col("date"),
-        pl.col("target_class"),
-        pl.lit(h).cast(pl.Int64).alias("h"),
-        pl.col("log_value").alias("p_0.5"),
-        (pl.col("log_value") + ZSCORES[0.1] * sigma).alias("p_0.1"),
-        (pl.col("log_value") + ZSCORES[0.9] * sigma).alias("p_0.9"),
-    )
-
-
-def _rw_return_quantiles(df: pl.DataFrame, h: int) -> dict[float, float]:
-    """Empirical quantiles of h-step returns, pooled across classes."""
-    e = (df[f"y_step_h{h}"] - df["log_value"]).drop_nulls()
-    if e.is_empty():
-        return dict.fromkeys(QUANTILES, 0.0)
-    return {q: float(e.quantile(q)) for q in QUANTILES}
-
-
-def fit_rw_emp(train: pl.DataFrame, h: int) -> dict[str, dict[float, float]]:
-    """Per-class empirical h-step return quantiles observed in train."""
-    d = train.select(
-        pl.col("target_class"),
-        (pl.col(f"y_step_h{h}") - pl.col("log_value")).alias("e"),
-    ).drop_nulls("e")
-    qmap: dict[str, dict[float, float]] = {}
-    for row in (
-        d.group_by("target_class")
-        .agg([pl.col("e").quantile(q).alias(f"q{q}") for q in QUANTILES])
-        .iter_rows(named=True)
-    ):
-        qmap[str(row["target_class"])] = {q: float(row[f"q{q}"]) for q in QUANTILES}
-    qmap["POOLED"] = _rw_return_quantiles(train, h)
-    return qmap
-
-
-def predict_rw_emp(
-    df: pl.DataFrame, h: int, qmap: dict[str, dict[float, float]]
-) -> pl.DataFrame:
-    """Random-walk with empirical return quantiles: P50 = current log level."""
-    class_map = {k: v for k, v in qmap.items() if k != "POOLED"}
-    exprs = []
-    for q in QUANTILES:
-        per_class = {k: v[q] for k, v in class_map.items()}
-        offset = pl.col("target_class").replace_strict(
-            per_class, default=qmap["POOLED"][q]
-        )
-        exprs.append((pl.col("log_value") + offset).alias(f"p_{q}"))
-    return df.select(
-        pl.col("date"),
-        pl.col("target_class"),
-        pl.lit(h).cast(pl.Int64).alias("h"),
-        *exprs,
-    )
-
-
-fit_rw_empirical = fit_rw_emp
-predict_rw_empirical = predict_rw_emp
 
 
 def naive_sign_metrics(df: pl.DataFrame, split: str, h: int) -> list[dict[str, object]]:
@@ -219,68 +126,12 @@ def naive_sign_metrics(df: pl.DataFrame, split: str, h: int) -> list[dict[str, o
     return rows
 
 
-def fit_ar1(train: pl.DataFrame, h: int) -> dict[str, object]:
-    """Pooled AR(1) with drift on *log returns*, plus per-class residual sigma."""
-    d = (
-        train.sort(["target_class", "date"])
-        .with_columns(pl.col("log_value").diff().over("target_class").alias("r_t"))
-        .drop_nulls(["r_t", f"y_step_h{h}"])
-    )
-    x = d["r_t"].to_numpy()
-    y = (d[f"y_step_h{h}"] - d["log_value"]).to_numpy()
-    b = float(((x * y).mean() - x.mean() * y.mean()) / ((x * x).mean() - x.mean() ** 2))
-    a = float(y.mean() - b * x.mean())
-    resid = y - (a + b * x)
-    pooled = float(resid.std())
-    sigmas = {
-        row["target_class"]: _clean_sigma(row["s"], pooled)
-        for row in d.with_columns(pl.lit(resid).alias("r"))
-        .group_by("target_class").agg(pl.col("r").std().alias("s"))
-        .iter_rows(named=True)
-    }
-    sigmas["POOLED"] = pooled
-    return {"a": a, "b": b, "sigmas": sigmas}
-
-
-def predict_ar1(df: pl.DataFrame, h: int, model: dict[str, object]) -> pl.DataFrame:
-    """Point + quantile columns for the return-space AR(1) baseline."""
-    a, b = float(model["a"]), float(model["b"])
-    sigmas: dict[str, float] = model["sigmas"]  # type: ignore[assignment]
-    r_t = pl.col("log_value").diff().over("target_class")
-    mean_ret = pl.lit(a) + pl.lit(b) * r_t
-    mean = pl.col("log_value") + mean_ret
-    sigma = pl.col("target_class").replace_strict(sigmas, default=sigmas["POOLED"])
-    return df.select(
-        pl.col("date"),
-        pl.col("target_class"),
-        pl.lit(h).cast(pl.Int64).alias("h"),
-        mean.alias("p_0.5"),
-        (mean + ZSCORES[0.1] * sigma).alias("p_0.1"),
-        (mean + ZSCORES[0.9] * sigma).alias("p_0.9"),
-    )
-
-
-def make_matrix(df: pl.DataFrame, h: int) -> tuple[list[str], object]:
-    """Feature matrix (numpy) plus feature names for tree models at horizon h."""
-    feats = [c for c in df.columns if c not in TREE_EXCLUDE]
-    mat = (
-        df.with_columns(
-            pl.col("target_class").replace_strict(CLASS_CODES).alias("target_class")
-        )
-        .select(feats)
-        .to_numpy()
-    )
-    return feats, mat
-
-
 def evaluate(
     pred: pl.DataFrame, source: pl.DataFrame, split: str, model: str
 ) -> list[dict[str, object]]:
     """Per-horizon interval / pinball / coverage metrics; pooled + per class.
 
     The horizon mask is ``y_step_h{h}`` non-null *and* a prediction present.
-    ``dir_hit`` is ``None`` for ``rw_emp``: its P50 is exactly the current
-    level, so a directional hit rate is structurally meaningless.
     """
     h = int(pred["h"][0])
     truth = source.select(
@@ -298,13 +149,13 @@ def evaluate(
         sub = j if cls is None else j.filter(pl.col("target_class") == cls)
         if sub.is_empty():
             continue
-        y = sub["y"]
-        p10, p50, p90 = sub["p_0.1"], sub["p_0.5"], sub["p_0.9"]
+        y = sub["y"].to_numpy()
+        p10, p50, p90 = (sub[c].to_numpy() for c in ("p_0.1", "p_0.5", "p_0.9"))
+        level = sub["log_value"].to_numpy()
         q_losses = [pinball(y, sub[f"p_{q}"], q) for q in QUANTILES]
         width = float((p90 - p10).mean())
-        below = (p10 - y).clip(lower_bound=0.0)
-        above = (y - p90).clip(lower_bound=0.0)
-        winkler = float(width + 10.0 * (below + above).mean())
+        # Winkler / interval score of the central interval (scoringrules).
+        winkler = float(np.asarray(sr.interval_score(y, p10, p90, INTERVAL_ALPHA)).mean())
         row: dict[str, object] = {
             "split": split, "h": h, "model": model, "scope": scope, "n": sub.height,
         }
@@ -316,12 +167,9 @@ def evaluate(
         row["cover_80"] = float(((y >= p10) & (y <= p90)).mean())
         row["width"] = width
         row["winkler_80"] = winkler
-        row["mae_p50"] = float((y - p50).abs().mean())
-        if model == "rw_emp":
-            row["dir_hit"] = None
-        else:
-            hits = (p50 > sub["log_value"]) == (y > sub["log_value"])
-            row["dir_hit"] = float(hits.mean())
+        row["mae_p50"] = float(np.abs(y - p50).mean())
+        hits = (p50 > level) == (y > level)
+        row["dir_hit"] = float(hits.mean())
         row["x_p10_gt_p50"] = float((p10 > p50).mean())
         row["x_p10_gt_p90"] = float((p10 > p90).mean())
         rows.append(row)
@@ -393,9 +241,9 @@ def common_support_rows(
 ) -> list[dict[str, object]]:
     """Re-score every model on the intersection of their available rows.
 
-    The LSTM needs a warm-up window, so its frame is a strict subset of the tree
-    and statistical frames. Restricting to the intersection makes the pooled and
-    per-class numbers directly comparable across model families.
+    The LSTM needs a warm-up window, so its frame is a strict subset of the
+    calibration-layer frames. Restricting to the intersection makes the pooled
+    and per-class numbers directly comparable across model families.
     """
     rows: list[dict[str, object]] = []
     for split_name in split_names:
@@ -414,8 +262,6 @@ def common_support_rows(
 
 def main() -> None:
     """Run all baselines, evaluate on valid/test, write metrics csv."""
-    from ml.models.lgbm import LGBMModel
-    from ml.models.xgb import XGBModel
     from ml.predictions import ensure_lstm_predictions
 
     _setup_logging()
@@ -426,9 +272,15 @@ def main() -> None:
             splits["test"] = load_frozen_test()
         LOGGER.warning("BASELINES_INCLUDE_TEST=1: test split is being scored")
     eval_splits = ["valid"] + (["test"] if "test" in splits else [])
+    # Burn-in date for the fuzzy matured-residual windows: residuals from the
+    # in-sample train base are excluded when calibrating/scoring, so the first
+    # out-of-sample rows simply fall back to the identity window.
+    valid_start = splits["valid"]["date"].min() if "valid" in splits else None
 
     all_rows: list[dict[str, object]] = []
     sign_rows: list[dict[str, object]] = []
+    aci_rows: list[dict[str, object]] = []
+    fuzzy_spread_rows: list[dict[str, object]] = []
     pred_store: dict[tuple[str, int, str], pl.DataFrame] = {}
 
     def record(model_name: str, split_name: str, pred: pl.DataFrame) -> None:
@@ -436,46 +288,14 @@ def main() -> None:
         all_rows.extend(evaluate(pred, splits[split_name], split_name, model_name))
         pred_store[(split_name, h, model_name)] = pred
 
-    # 1. Statistical baselines, per horizon on that horizon's mask.
+    # 1. Naive-sign diagnostic, per horizon on that horizon's mask.
     for h in HORIZONS:
-        candidates: dict[str, dict[str, pl.DataFrame]] = {}
-        if selected is None or "rw" in selected:
-            candidates["rw"] = {
-                s: predict_rw(splits[s], h, fit_rw_sigmas(splits["train"], h))
-                for s in eval_splits
-            }
-        if selected is None or "rw_emp" in selected:
-            candidates["rw_emp"] = {
-                s: predict_rw_emp(splits[s], h, fit_rw_emp(splits["train"], h))
-                for s in eval_splits
-            }
-        if selected is None or "ar1" in selected:
-            candidates["ar1"] = {
-                s: predict_ar1(splits[s], h, fit_ar1(splits["train"], h))
-                for s in eval_splits
-            }
-        for model, split_preds in candidates.items():
-            for split_name, pred in split_preds.items():
-                record(model, split_name, pred)
         if selected is None or "naive_sign" in selected:
             for split_name in eval_splits:
                 sign_rows.extend(naive_sign_metrics(splits[split_name], split_name, h))
-        LOGGER.info("h=%d: statistical baselines done", h)
+        LOGGER.info("h=%d: naive-sign diagnostic done", h)
 
-    # 2. Tree models.
-    for model_name, ModelClass in (("xgb", XGBModel), ("lgbm", LGBMModel)):
-        if selected is not None and model_name not in selected:
-            continue
-        LOGGER.info("Training and evaluating %s...", model_name)
-        model = ModelClass()
-        model.fit(splits["train"], list(HORIZONS))
-        preds_dict = model.predict({s: splits[s] for s in eval_splits})
-        for split_name, h_preds in preds_dict.items():
-            for h, pred_df in h_preds.items():
-                record(model_name, split_name, pred_df)
-        LOGGER.info("%s: done", model_name)
-
-    # 3. LSTM ensemble + calibration layers.
+    # 2. LSTM ensemble + calibration layers.
     lstm_wanted = selected is None or any(
         m in (selected or set()) for m in ("lstm", "lstm_fuzzy", "lstm_fuzzy_old", "const_shift", "cqr", "aci")
     )
@@ -487,7 +307,7 @@ def main() -> None:
                 for h in HORIZONS:
                     record("lstm", split_name, mean_preds[split_name][h])
 
-        # 3a. Old fuzzy layer (ablation).
+        # 2a. Old fuzzy layer (ablation).
         if selected is None or "lstm_fuzzy_old" in selected:
             for split_name in eval_splits:
                 history = _history_for(split_name, splits)
@@ -495,7 +315,7 @@ def main() -> None:
                     cal = fuzzy_calibrate_old(mean_preds[split_name][h], history, h)
                     record("lstm_fuzzy_old", split_name, cal)
 
-        # 3b. Conformal baselines, calibrated on valid.
+        # 2b. Conformal baselines, calibrated on valid.
         if selected is None or any(m in (selected or set()) for m in ("const_shift", "cqr", "aci")):
             for h in HORIZONS:
                 calib_frame = _context_frame(mean_preds, splits, ["valid"], h)
@@ -511,14 +331,27 @@ def main() -> None:
                     if selected is None or "aci" in selected:
                         adj, aci_state = aci_adjust(raw, splits[split_name], h, state=aci_state)
                         record("aci", split_name, adj)
+                        for cls, st in (aci_state or {}).items():
+                            if not isinstance(st, dict):
+                                continue
+                            a = float(st["alpha"])
+                            sc = np.asarray(st["scores"], dtype=float)
+                            w = float(np.quantile(sc, 1.0 - a)) if sc.size else float("nan")
+                            aci_rows.append({
+                                "split": split_name, "h": h, "target_class": cls,
+                                "alpha_final": a, "w_next": w,
+                                "score_min": float(sc.min()) if sc.size else float("nan"),
+                                "score_max": float(sc.max()) if sc.size else float("nan"),
+                                "n_scores": int(sc.size),
+                            })
 
-        # 3c. New Sugeno fuzzy layer, trained on valid, frozen for test.
+        # 2c. New Sugeno fuzzy layer, trained on valid, frozen for test.
         if selected is None or "lstm_fuzzy" in selected:
             for h in HORIZONS:
                 context_names = ["train", "valid"] + (["test"] if "test" in splits else [])
                 context = _context_frame(mean_preds, splits, context_names, h)
                 train_frame = _context_frame(mean_preds, splits, ["valid"], h)
-                params, stats = fit_fuzzy(context, train_frame, h)
+                params, stats = fit_fuzzy(context, train_frame, h, matured_from=valid_start)
                 save_params(params, f"lstm_fuzzy_h{h}")
                 LOGGER.info("h=%d fuzzy params:\n%s", h, describe_params(params))
                 try:
@@ -526,14 +359,42 @@ def main() -> None:
                 except Exception as exc:  # noqa: BLE001 - plotting is best-effort
                     LOGGER.warning("fuzzy plot failed: %s", exc)
                 LOGGER.info(
-                    "h=%d fuzzy: n_train=%d median_matured=%.1f frac_matured=%.2f",
-                    h, stats["n_train"], stats["n_matured_median"], stats["frac_rows_with_matured"],
+                    "h=%d fuzzy: n_train=%d window=%d median_matured=%.1f "
+                    "frac_matured=%.2f s_scale=%.3f width_inputs=%s loc_inputs=%s",
+                    h, stats["n_train"], stats["n_matured_window"], stats["n_matured_median"],
+                    stats["frac_rows_with_matured"], stats["s_scale"],
+                    stats["width_inputs"], stats["loc_inputs"],
                 )
                 for split_name in eval_splits:
                     hist_names = ["train", "valid"] + (["test"] if (split_name == "test" and "test" in splits) else [])
                     history = _context_frame(mean_preds, splits, hist_names, h)
-                    cal = fuzzy_calibrate(mean_preds[split_name][h], history, h, params)
+                    cal = fuzzy_calibrate(mean_preds[split_name][h], history, h, params, matured_from=valid_start)
                     record("lstm_fuzzy", split_name, cal)
+
+                # Calibrator seed spread: the reported model is seed 0; seeds
+                # 1-4 show how sensitive the layer is to its initialisation.
+                seed_models: dict[int, object] = {0: params}
+                for seed in (1, 2, 3, 4):
+                    seed_params, _ = fit_fuzzy(
+                        context, train_frame, h, seed=seed, matured_from=valid_start
+                    )
+                    seed_models[seed] = seed_params
+                for seed, seed_params in seed_models.items():
+                    for split_name in eval_splits:
+                        hist_names = ["train", "valid"] + (["test"] if (split_name == "test" and "test" in splits) else [])
+                        history = _context_frame(mean_preds, splits, hist_names, h)
+                        cal = fuzzy_calibrate(
+                            mean_preds[split_name][h], history, h, seed_params,
+                            matured_from=valid_start,
+                        )
+                        for r in evaluate(cal, splits[split_name], split_name, "lstm_fuzzy"):
+                            if r["scope"] != "POOLED":
+                                continue
+                            fuzzy_spread_rows.append({
+                                "split": split_name, "h": h, "seed": seed, "n": r["n"],
+                                "pinball_mean": r["pinball_mean"],
+                                "cover_80": r["cover_80"], "width": r["width"],
+                            })
 
     metrics = pl.DataFrame(all_rows).sort(["split", "h", "model", "scope"])
     out_path = DATA / "baseline_metrics.csv"
@@ -542,7 +403,7 @@ def main() -> None:
 
     # Common-support table: the same rows for every non-ablation model.
     common_models = [
-        m for m in ("lstm", "lstm_fuzzy", "cqr", "aci", "ar1", "xgb", "rw_emp")
+        m for m in ("lstm", "lstm_fuzzy", "cqr", "aci")
         if (eval_splits[0], HORIZONS[0], m) in pred_store
     ]
     if len(common_models) >= 2:
@@ -572,11 +433,11 @@ def main() -> None:
             context = _context_frame(mean_preds, splits, context_names, h)
             train_frame = _context_frame(mean_preds, splits, ["valid"], h)
             for arm, kw in arms.items():
-                params, _ = fit_fuzzy(context, train_frame, h, **kw)
+                params, _ = fit_fuzzy(context, train_frame, h, matured_from=valid_start, **kw)
                 for split_name in eval_splits:
                     hist_names = ["train", "valid"] + (["test"] if (split_name == "test" and "test" in splits) else [])
                     history = _context_frame(mean_preds, splits, hist_names, h)
-                    cal = fuzzy_calibrate(mean_preds[split_name][h], history, h, params)
+                    cal = fuzzy_calibrate(mean_preds[split_name][h], history, h, params, matured_from=valid_start)
                     for r in evaluate(cal, splits[split_name], split_name, "lstm_fuzzy"):
                         abl_rows.append({**r, "arm": arm})
         abl_path = DATA / "fuzzy_ablations.csv"
@@ -588,6 +449,27 @@ def main() -> None:
         sign_path = DATA / "naive_sign_metrics.csv"
         sign_metrics.write_csv(sign_path)
         LOGGER.info("wrote %s (%d rows)", sign_path, sign_metrics.height)
+
+    if aci_rows:
+        aci_path = DATA / "aci_diagnostics.csv"
+        aci_df = pl.DataFrame(aci_rows).sort(["split", "h", "target_class"])
+        aci_df.write_csv(aci_path)
+        LOGGER.info("wrote %s (%d rows)", aci_path, aci_df.height)
+        LOGGER.info("ACI final state:\n%s", aci_df)
+
+    if fuzzy_spread_rows:
+        spread_path = DATA / "fuzzy_seed_spread.csv"
+        spread_df = pl.DataFrame(fuzzy_spread_rows).sort(["split", "h", "seed"])
+        spread_df.write_csv(spread_path)
+        agg = spread_df.group_by(["split", "h"]).agg(
+            pl.col("pinball_mean").min().alias("pinball_min"),
+            pl.col("pinball_mean").max().alias("pinball_max"),
+            pl.col("pinball_mean").std().alias("pinball_sd"),
+            pl.col("cover_80").min().alias("cover_min"),
+            pl.col("cover_80").max().alias("cover_max"),
+        ).sort(["split", "h"])
+        LOGGER.info("wrote %s (%d rows)", spread_path, spread_df.height)
+        LOGGER.info("fuzzy calibrator seed spread:\n%s", agg)
 
     # Diebold-Mariano + block bootstrap: lstm_fuzzy vs its competitors.
     dm_rows: list[dict[str, object]] = []
@@ -601,12 +483,14 @@ def main() -> None:
                 if comp_key not in pred_store:
                     continue
                 for q in (0.1, 0.5, 0.9, None):
-                    la, lb, _ = aligned_losses(pred_store[base_key], pred_store[comp_key], splits[split_name], h, q)
+                    la, lb, j = aligned_losses(pred_store[base_key], pred_store[comp_key], splits[split_name], h, q)
                     dm = dm_test(la, lb, h)
-                    boot = block_bootstrap_ci(la - lb, block=max(h, 5))
+                    boot = date_cluster_bootstrap_ci(la - lb, j["date"].to_numpy())
+                    block = block_bootstrap_ci(la - lb, block=max(h, 5))
                     dm_rows.append({
                         "split": split_name, "h": h, "competitor": comp,
                         "quantile": "mean" if q is None else q, **dm, **boot,
+                        "block_lo": block["boot_lo"], "block_hi": block["boot_hi"],
                     })
     if dm_rows:
         dm_df = pl.DataFrame(dm_rows)
