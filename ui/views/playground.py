@@ -1,4 +1,4 @@
-"""Playground: live XGBoost inference, a manual Sugeno calculator, and per-class comparison."""
+"""Playground: live quantile-LSTM inference, a manual Sugeno calculator, and per-class comparison."""
 
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ def _live_tab() -> None:
 
     try:
         predictor = _predictor(h)
-        xgb = predictor.predict(window_df)
+        lstm_pred = predictor.predict(window_df)
     except Exception as exc:  # noqa: BLE001 - surface a friendly message
         st.error(f"LSTM inference failed: {exc}")
         return
@@ -90,14 +90,14 @@ def _live_tab() -> None:
     truth = loaders.truth_frame("valid", h).filter(pl.col("target_class") == cls)
     st.altair_chart(
         viz.fan_chart(
-            xgb,
+            lstm_pred,
             lstm,
             truth.select("date", "y"),
             title=f"LSTM central-80 (band) vs LSTM median (line) — {cls}, h={h}",
         ),
         width="stretch",
     )
-    st.dataframe(xgb.tail(12), hide_index=True, width="stretch")
+    st.dataframe(lstm_pred.tail(12), hide_index=True, width="stretch")
 
 
 def _calculator_tab() -> None:
