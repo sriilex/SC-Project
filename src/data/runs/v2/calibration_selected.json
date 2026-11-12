@@ -1,0 +1,112 @@
+{
+  "run": "v2",
+  "generated_at": "2026-11-12T22:07:13",
+  "lstm_prediction_key": "69e158d2977b",
+  "protocol": "all arms fitted on the valid split using frozen LSTM predictions; selection on valid pooled pinball only; test scored once for the selected variant when enabled",
+  "selection_rule": "lowest mean pooled validation pinball, ties by mean Winkler",
+  "selected": "sugeno_lin_split",
+  "arms": {
+    "base": {},
+    "const_wl": {
+      "kind": "constant_width_location"
+    },
+    "linear_state": {
+      "kind": "linear"
+    },
+    "sugeno0": {},
+    "sugeno1": {
+      "linear": true
+    },
+    "sugeno_reg": {
+      "linear": true,
+      "weight_decay": 0.001,
+      "early_stopping_patience": 50
+    },
+    "sugeno_split": {
+      "split_width": true
+    },
+    "sugeno_lin_split": {
+      "linear": true,
+      "split_width": true
+    },
+    "sugeno_cls": {
+      "class_shrinkage": 0.5
+    },
+    "sugeno_full": {
+      "linear": true,
+      "split_width": true,
+      "class_shrinkage": 0.5,
+      "weight_decay": 0.001,
+      "early_stopping_patience": 50
+    }
+  },
+  "fit": {
+    "epochs": 600,
+    "lr": 0.05,
+    "seed": 0,
+    "split": "valid"
+  },
+  "test_included": true,
+  "validation_ranking": [
+    {
+      "arm": "sugeno_lin_split",
+      "mean_pinball": 0.03200635374865821,
+      "mean_winkler": 0.460876847098428,
+      "mean_cover": 0.8031465455643015
+    },
+    {
+      "arm": "sugeno1",
+      "mean_pinball": 0.03229723953500335,
+      "mean_winkler": 0.46477893327852826,
+      "mean_cover": 0.7980312587084198
+    },
+    {
+      "arm": "sugeno_cls",
+      "mean_pinball": 0.033656863469059065,
+      "mean_winkler": 0.4857530249165064,
+      "mean_cover": 0.7906734115582368
+    },
+    {
+      "arm": "sugeno_split",
+      "mean_pinball": 0.03370810852941125,
+      "mean_winkler": 0.48787149105495065,
+      "mean_cover": 0.800535633610964
+    },
+    {
+      "arm": "sugeno0",
+      "mean_pinball": 0.033806838090385975,
+      "mean_winkler": 0.4869852350914272,
+      "mean_cover": 0.7922286016322895
+    },
+    {
+      "arm": "sugeno_full",
+      "mean_pinball": 0.035692861337799205,
+      "mean_winkler": 0.513749965573782,
+      "mean_cover": 0.828100598899467
+    },
+    {
+      "arm": "sugeno_reg",
+      "mean_pinball": 0.03608157091456336,
+      "mean_winkler": 0.5135239020317586,
+      "mean_cover": 0.807762640360694
+    },
+    {
+      "arm": "linear_state",
+      "mean_pinball": 0.03693184336468391,
+      "mean_winkler": 0.530049860357926,
+      "mean_cover": 0.7732129088306392
+    },
+    {
+      "arm": "const_wl",
+      "mean_pinball": 0.039220302837225676,
+      "mean_winkler": 0.5683880580047009,
+      "mean_cover": 0.7646932142494645
+    },
+    {
+      "arm": "base",
+      "mean_pinball": 0.04158315452625068,
+      "mean_winkler": 0.6430180561826354,
+      "mean_cover": 0.840862537966989
+    }
+  ]
+}

@@ -24,9 +24,22 @@ HORIZONS: Final[tuple[int, ...]] = (1, 7, 30, 90)
 CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax", "Handysize")
 MAIN_MODELS: Final[dict[str, str]] = {
     "lstm": "Base",
-    "lstm_fuzzy": "Sugeno",
+    "lstm_fuzzy": "Sugeno (zero-order)",
+    "sugeno_sel": "Sugeno (selected)",
     "cqr": "CQR",
     "aci": "ACI",
+}
+VALIDATION_ARMS: Final[dict[str, str]] = {
+    "base": "Base (no calibration)",
+    "const_wl": "Constant width + location",
+    "linear_state": "Linear state-dependent",
+    "sugeno0": "Sugeno zero-order",
+    "sugeno1": "Sugeno first-order",
+    "sugeno_split": "Sugeno split width",
+    "sugeno_lin_split": "Sugeno first-order + split width",
+    "sugeno_cls": "Sugeno + class shrinkage",
+    "sugeno_reg": "Sugeno + early stop / weight decay",
+    "sugeno_full": "Sugeno full combination",
 }
 ATTR_LABELS: Final[dict[str, str]] = {
     "attr_constant_width": "Constant width",
@@ -220,12 +233,138 @@ def bootstrap_table(dm: pl.DataFrame | None) -> list[str]:
     return lines
 
 
+def _append_selected(main_metrics: pl.DataFrame | None) -> pl.DataFrame | None:
+    """Add the validation-selected Sugeno variant's one-shot test rows."""
+    path = DATA / "runs" / "v2" / "calibration_test_selected.csv"
+    if not path.exists():
+        return main_metrics
+    sel = pl.read_csv(path).with_columns(pl.lit("sugeno_sel").alias("model")).drop("arm")
+    if main_metrics is None:
+        return sel
+    return pl.concat([main_metrics, sel], how="diagonal_relaxed")
+
+
+def validation_ablation_table(valid: pl.DataFrame | None) -> list[str]:
+    """Table 5: validation-only calibration ablation, pooled."""
+    lines = [
+        "## Table 5 — Validation-only calibration ablation (pooled)",
+        "",
+        "Every arm is fitted on `valid` with frozen LSTM quantiles and scored on `valid`;",
+        "the test split is not involved. Lower pinball and Winkler are better.",
+        "",
+        "| h | arm | n | mean pinball | cover-80 | Winkler-80 |",
+        "|---|---|---|---|---|---|",
+    ]
+    if valid is None:
+        lines += ["| — | (run `ml.calibration_ablation` first) | — | — | — | — |", ""]
+        return lines
+    m = valid.filter(pl.col("scope") == "POOLED")
+    for h in HORIZONS:
+        sub = m.filter(pl.col("h") == h)
+        if sub.is_empty():
+            continue
+        best_pin = float(sub["pinball_mean"].min())
+        for arm, label in VALIDATION_ARMS.items():
+            r = sub.filter(pl.col("arm") == arm)
+            if r.is_empty():
+                continue
+            row = r.row(0, named=True)
+            lines.append(
+                f"| {h} | {label} | {row['n']} | {_bold(float(row['pinball_mean']), best_pin)} "
+                f"| {row['cover_80']:.3f} | {row['winkler_80']:.4f} |"
+            )
+    lines.append("")
+    return lines
+
+
+def validation_per_class_table(valid: pl.DataFrame | None) -> list[str]:
+    """Table 5b: validation ablation per class at h=90."""
+    keep = ("base", "const_wl", "linear_state", "sugeno0", "sugeno_lin_split")
+    lines = [
+        "## Table 5b — Validation ablation at h=90, per class",
+        "",
+        "Same arms and protocol as Table 5, restricted to the long horizon and split by class.",
+        "",
+        "| class | arm | n | mean pinball | cover-80 | Winkler-80 |",
+        "|---|---|---|---|---|---|",
+    ]
+    if valid is None:
+        lines += ["| — | (run `ml.calibration_ablation` first) | — | — | — | — |", ""]
+        return lines
+    m = valid.filter((pl.col("h") == 90) & (pl.col("scope").is_in(list(CLASSES))))
+    for cls in CLASSES:
+        sub = m.filter(pl.col("scope") == cls)
+        if sub.is_empty():
+            continue
+        best_pin = float(sub["pinball_mean"].min())
+        for arm in keep:
+            r = sub.filter(pl.col("arm") == arm)
+            if r.is_empty():
+                continue
+            row = r.row(0, named=True)
+            lines.append(
+                f"| {cls} | {VALIDATION_ARMS[arm]} | {row['n']} | {_bold(float(row['pinball_mean']), best_pin)} "
+                f"| {row['cover_80']:.3f} | {row['winkler_80']:.4f} |"
+            )
+    lines.append("")
+    return lines
+
+
+def selected_test_table(selected: pl.DataFrame | None, attr: pl.DataFrame | None, main_m: pl.DataFrame | None) -> list[str]:
+    """Table 6: one-shot test score of the validation-selected variant."""
+    lines = [
+        "## Table 6 — Frozen test: selected variant vs base and frozen simple calibrators",
+        "",
+        "The Sugeno row is the only arm scored on test in the new run (one-shot, after",
+        "selection on validation). Base and simple-calibrator test numbers are the",
+        "previously frozen reference run, not new test reads.",
+        "",
+        "| h | model | n | mean pinball | cover-80 | Winkler-80 |",
+        "|---|---|---|---|---|---|",
+    ]
+    if selected is None:
+        lines += ["| — | (run `ml.calibration_ablation` with CALIB_INCLUDE_TEST=1) | — | — | — | — |", ""]
+        return lines
+    sel = selected.filter(pl.col("scope") == "POOLED")
+    for h in HORIZONS:
+        rows: list[tuple[str, dict[str, object]]] = []
+        r = sel.filter(pl.col("h") == h)
+        if not r.is_empty():
+            rows.append(("Sugeno (selected)", r.row(0, named=True)))
+        if main_m is not None:
+            b = main_m.filter(
+                (pl.col("split") == "test") & (pl.col("h") == h)
+                & (pl.col("scope") == "POOLED") & (pl.col("model") == "lstm")
+            )
+            if not b.is_empty():
+                rows.append(("Base", b.row(0, named=True)))
+        if attr is not None:
+            a = attr.filter((pl.col("split") == "test") & (pl.col("h") == h) & (pl.col("scope") == "POOLED"))
+            for model, label in ATTR_LABELS.items():
+                ar = a.filter(pl.col("model") == model)
+                if not ar.is_empty():
+                    rows.append((label, ar.row(0, named=True)))
+        if not rows:
+            continue
+        best_pin = min(float(rw["pinball_mean"]) for _, rw in rows)
+        best_win = min(float(rw["winkler_80"]) for _, rw in rows)
+        for label, rw in rows:
+            lines.append(
+                f"| {h} | {label} | {rw['n']} | {_bold(float(rw['pinball_mean']), best_pin)} "
+                f"| {rw['cover_80']:.3f} | {_bold(float(rw['winkler_80']), best_win)} |"
+            )
+    lines.append("")
+    return lines
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    main_metrics = _read("baseline_metrics_common.csv")
+    main_metrics = _append_selected(_read("baseline_metrics_common.csv"))
     attr_metrics = _read("attribution_metrics.csv")
     stack_metrics = _read("fuzzy_cqr_stack.csv")
     dm = _read("baseline_dm.csv")
+    valid_ablation = _read("runs/v2/calibration_ablation_valid.csv")
+    selected_test = _read("runs/v2/calibration_test_selected.csv")
 
     lines: list[str] = [
         "# Paper tables — generated from run outputs",
@@ -240,6 +379,9 @@ def main() -> None:
         lines += per_class_h90(main_metrics)
     lines += attribution_table(attr_metrics)
     lines += stack_table(stack_metrics)
+    lines += validation_ablation_table(valid_ablation)
+    lines += validation_per_class_table(valid_ablation)
+    lines += selected_test_table(selected_test, attr_metrics, main_metrics)
     lines += bootstrap_table(dm)
     OUT.write_text("\n".join(lines), encoding="utf-8")
     LOGGER.info("wrote %s", OUT)

@@ -126,3 +126,81 @@ def test_fit_fuzzy_keeps_ordering_and_is_identity_at_init() -> None:
     )
     assert (out["p_0.1"] <= out["p_0.5"]).all()
     assert (out["p_0.5"] <= out["p_0.9"]).all()
+
+
+def test_first_order_consequents_are_fitted_and_evaluated() -> None:
+    """`linear=True` stores per-rule linear coefficients and stays ordered."""
+    frame = _synthetic_frame(n=240)
+    train = frame.tail(80)
+    params, _stats = fit_fuzzy(frame, train, h=1, linear=True, epochs=10)
+    spec = params["width"]
+    assert spec["linear_coefs"] is not None
+    assert len(spec["linear_coefs"]) == len(spec["consequents"])
+    out = calibrate(
+        train.select("date", "target_class", pl.lit(1).cast(pl.Int64).alias("h"), "p_0.1", "p_0.5", "p_0.9"),
+        frame,
+        1,
+        params,
+    )
+    assert (out["p_0.1"] <= out["p_0.5"]).all()
+    assert (out["p_0.5"] <= out["p_0.9"]).all()
+
+
+def test_split_width_has_two_bounded_outputs() -> None:
+    """`split_width=True` fits separate lower/upper log multipliers."""
+    frame = _synthetic_frame(n=240)
+    train = frame.tail(80)
+    params, stats = fit_fuzzy(frame, train, h=1, split_width=True, epochs=10)
+    spec = params["width"]
+    assert spec["n_outputs"] == 2
+    assert np.asarray(spec["output_scale"]).shape == (2,)
+    assert stats["split_width"] is True
+    x = np.array([[0.0, 0.0]])
+    trace = fis_forward(spec, x)
+    assert trace["output"].shape == (1, 2)
+    assert np.all(np.abs(trace["output"]) <= np.asarray(spec["output_scale"]))
+
+
+def test_class_shrinkage_stores_per_class_offsets() -> None:
+    """`class_shrinkage` records a shrunk offset for every fitted class."""
+    frame = _synthetic_frame(n=240).with_columns(
+        pl.when(pl.int_range(0, 240) % 2 == 0)
+        .then(pl.lit("Capesize"))
+        .otherwise(pl.lit("Panamax"))
+        .alias("target_class")
+    )
+    params, stats = fit_fuzzy(frame, frame.tail(80), h=1, class_shrinkage=0.5, epochs=10)
+    adjust = params["class_adjust"]
+    assert set(adjust) == {"Capesize", "Panamax"}
+    assert all("s" in v and "m" in v for v in adjust.values())
+    assert stats["class_shrinkage"] == 0.5
+    out = calibrate(
+        frame.tail(20).select("date", "target_class", pl.lit(1).cast(pl.Int64).alias("h"), "p_0.1", "p_0.5", "p_0.9"),
+        frame,
+        1,
+        params,
+    )
+    assert (out["p_0.1"] <= out["p_0.5"]).all()
+
+
+def test_early_stopping_and_weight_decay_run() -> None:
+    """Early stopping reports the best epoch and keeps quantiles ordered."""
+    frame = _synthetic_frame(n=240)
+    params, stats = fit_fuzzy(
+        frame,
+        frame.tail(120),
+        h=1,
+        epochs=40,
+        early_stopping_patience=10,
+        weight_decay=1e-3,
+    )
+    assert 0 <= stats["best_epoch"] <= 40
+    assert stats["val_pinball"] is not None
+    out = calibrate(
+        frame.tail(20).select("date", "target_class", pl.lit(1).cast(pl.Int64).alias("h"), "p_0.1", "p_0.5", "p_0.9"),
+        frame,
+        1,
+        params,
+    )
+    assert (out["p_0.1"] <= out["p_0.5"]).all()
+    assert (out["p_0.5"] <= out["p_0.9"]).all()

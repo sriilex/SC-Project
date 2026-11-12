@@ -68,6 +68,10 @@ MIN_MATURED: Final[int] = 5
 N_MATURED_INDEPENDENT: Final[int] = 5
 #: Trailing window (days) for the volatility input.
 VOL_WINDOW: Final[int] = 14
+#: L2 shrinkage strength pulling per-class offsets toward zero. The penalty is
+#: ``CLASS_SHRINKAGE * (sum_c s_c^2 / s_scale^2 + sum_c m_c^2)`` on the mean
+#: pinball loss, so it is scale-free and can be read as a pseudo-count.
+CLASS_SHRINKAGE: Final[float] = 3.0
 
 
 def matured_window(h: int) -> int:
@@ -197,16 +201,19 @@ def compute_fuzzy_inputs(
 def fis_forward(spec: dict[str, object], x: np.ndarray) -> dict[str, np.ndarray]:
     """Evaluate a Sugeno FIS and return its internal activations.
 
-    Shapes assume ``n`` rows, ``p`` inputs and ``m`` membership functions:
-    ``membership`` is ``(n, p, m)``, ``rule_weight`` and
-    ``rule_contribution`` are ``(n, R)`` with ``R = m ** p``, and ``raw`` /
-    ``output`` are ``(n,)``. Contributions sum to ``raw`` before the optional
-    bounded output transform.
+    Shapes assume ``n`` rows, ``p`` inputs, ``m`` membership functions and
+    ``o`` outputs: ``membership`` is ``(n, p, m)``, ``rule_weight`` and
+    ``rule_contribution`` are ``(n, R)`` (or ``(n, R, o)`` for ``o > 1``) with
+    ``R = m ** p``, and ``raw`` / ``output`` are ``(n,)`` for ``o = 1`` and
+    ``(n, o)`` otherwise. Contributions sum to ``raw`` before the optional
+    bounded output transform. First-order consequents are supported through
+    ``linear_coefs``.
     """
     centers = np.asarray(spec["centers"], dtype=float)
     widths = np.asarray(spec["widths"], dtype=float)
     n_inputs = centers.shape[0]
     n_mfs = centers.shape[1]
+    n_out = int(spec.get("n_outputs", 1))
     x = np.atleast_2d(x)
     if x.shape[1] != n_inputs:
         raise ValueError(f"expected {n_inputs} inputs, got {x.shape[1]}")
@@ -217,22 +224,27 @@ def fis_forward(spec: dict[str, object], x: np.ndarray) -> dict[str, np.ndarray]
     for j, idx in enumerate(rule_idx):
         for i, mi in enumerate(idx):
             w[:, j] *= mu[:, i, mi]
-    cons = np.asarray(spec["consequents"], dtype=float).reshape(-1)
-    f = np.tile(cons[None, :], (x.shape[0], 1))
+    cons = np.asarray(spec["consequents"], dtype=float).reshape(len(rule_idx), n_out)
+    f = np.tile(cons[None, :, :], (x.shape[0], 1, 1))
     lin = spec.get("linear_coefs")
     if lin is not None:
-        lin = np.asarray(lin, dtype=float)
-        f = f + (lin[None, :, :] * x[:, None, :]).sum(axis=2)
-    num = (w * f).sum(axis=1)
-    den = w.sum(axis=1) + 1e-12
+        lin = np.asarray(lin, dtype=float).reshape(len(rule_idx), n_inputs, n_out)
+        f = f + (lin[None, :, :, :] * x[:, None, :, None]).sum(axis=2)
+    num = (w[:, :, None] * f).sum(axis=1)
+    den = w.sum(axis=1)[:, None] + 1e-12
     raw = num / den
-    scale = float(spec.get("output_scale", 1.0))
+    scale = np.asarray(spec.get("output_scale", 1.0), dtype=float)
     out = scale * np.tanh(raw) if spec.get("bounded", True) else raw
+    contribution = (w[:, :, None] * f) / den[:, :, None]
+    if n_out == 1:
+        raw = raw[:, 0]
+        out = out[:, 0]
+        contribution = contribution[:, :, 0]
     return {
         "membership": mu,
         "rule_weight": w,
-        "rule_weight_normalized": w / den[:, None],
-        "rule_contribution": (w * f) / den[:, None],
+        "rule_weight_normalized": w / den,
+        "rule_contribution": contribution,
         "raw": raw,
         "output": out,
     }
@@ -244,12 +256,20 @@ def _fis_numpy(spec: dict[str, object], x: np.ndarray) -> np.ndarray:
 
 
 def _adjust_numpy(base: np.ndarray, m: np.ndarray, s: np.ndarray) -> np.ndarray:
-    """Apply (m, s) to base columns [p10, p50, p90] (n, 3); numpy."""
+    """Apply (m, s) to base columns [p10, p50, p90] (n, 3); numpy.
+
+    ``m`` may be a scalar-per-row array ``(n,)`` (one symmetric multiplier) or
+    ``(n, 2)`` with separate lower/upper multipliers.
+    """
     p10, p50, p90 = base[:, 0], base[:, 1], base[:, 2]
     p50_new = p50 + s
-    mult = np.exp(m)
-    p10_new = p50_new - (p50 - p10) * mult
-    p90_new = p50_new + (p90 - p50) * mult
+    m = np.asarray(m, dtype=float)
+    if m.ndim == 2:
+        m_lo, m_hi = m[:, 0], m[:, 1]
+    else:
+        m_lo = m_hi = m
+    p10_new = p50_new - (p50 - p10) * np.exp(m_lo)
+    p90_new = p50_new + (p90 - p50) * np.exp(m_hi)
     out = np.stack([p10_new, p50_new, p90_new], axis=1)
     # Numerical safety: enforce ordering.
     out[:, 0] = np.minimum(out[:, 0], out[:, 1])
@@ -302,6 +322,22 @@ def calibrate(
     m = _fis_numpy(width_spec, _norm_inputs(xw, width_spec)) if width_cols else np.zeros(n)
     s = _fis_numpy(loc_spec, _norm_inputs(xl, loc_spec)) if loc_cols else np.zeros(n)
 
+    # Optional per-class offsets, already shrunk toward zero during fitting.
+    class_adjust = params.get("class_adjust") or {}
+    if class_adjust:
+        classes = joined["target_class"].to_list()
+        dz = np.zeros(n)
+        m = np.array(m, dtype=float)
+        dm = np.zeros_like(m)
+        for i, cls in enumerate(classes):
+            adj = class_adjust.get(cls)
+            if adj is None:
+                continue
+            dz[i] = float(adj["s"])
+            dm[i] = np.asarray(adj["m"], dtype=float) if m.ndim == 2 else float(adj["m"])
+        s = s + dz
+        m = m + dm
+
     base = np.stack([
         joined["p_0.1"].to_numpy().astype(float),
         joined["p_0.5"].to_numpy().astype(float),
@@ -319,27 +355,37 @@ def calibrate(
 # torch training (base model frozen)
 # ---------------------------------------------------------------------------
 
-def _sugeno_torch(n_inputs: int, n_mfs: int, linear: bool, output_scale: float, bounded: bool):
+def _sugeno_torch(
+    n_inputs: int,
+    n_mfs: int,
+    linear: bool,
+    output_scale: float | list[float],
+    bounded: bool,
+    n_outputs: int = 1,
+):
     import torch
     from torch import nn
     from torch.nn import functional as F
+
+    scale = float(output_scale) if np.ndim(output_scale) == 0 else torch.tensor(output_scale, dtype=torch.float32)
 
     class SugenoFIS(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.n_inputs = n_inputs
             self.n_mfs = n_mfs
+            self.n_outputs = n_outputs
             self.linear = linear
-            self.output_scale = output_scale
+            self.output_scale = scale
             self.bounded = bounded
             centers = torch.linspace(-1.0, 1.0, n_mfs).repeat(n_inputs, 1)
             self.centers = nn.Parameter(centers)
             self.log_widths = nn.Parameter(torch.full((n_inputs, n_mfs), math.log(0.7)))
             rule_idx = list(itertools.product(range(n_mfs), repeat=n_inputs))
             self.register_buffer("rule_idx", torch.tensor(rule_idx, dtype=torch.long))
-            self.consequents = nn.Parameter(torch.zeros(len(rule_idx), 1))
+            self.consequents = nn.Parameter(torch.zeros(len(rule_idx), n_outputs))
             if linear:
-                self.lin = nn.Parameter(torch.zeros(len(rule_idx), n_inputs, 1))
+                self.lin = nn.Parameter(torch.zeros(len(rule_idx), n_inputs, n_outputs))
             else:
                 self.lin = None
 
@@ -356,7 +402,9 @@ def _sugeno_torch(n_inputs: int, n_mfs: int, linear: bool, output_scale: float, 
                 f = f + (self.lin.unsqueeze(0) * x.unsqueeze(1).unsqueeze(-1)).sum(dim=2)
             num = (w.unsqueeze(-1) * f).sum(dim=1)
             den = w.sum(dim=1, keepdim=True) + 1e-9
-            out = (num / den).squeeze(-1)
+            out = num / den
+            if self.n_outputs == 1:
+                out = out.squeeze(-1)
             if self.bounded:
                 out = self.output_scale * torch.tanh(out)
             return out
@@ -369,13 +417,15 @@ def _spec_from_torch(fis, inputs: list[str], norm_mean: np.ndarray, norm_std: np
 
     widths = (F.softplus(fis.log_widths) + 1e-3).detach().cpu().numpy()
     linear = fis.linear
+    n_out = int(fis.n_outputs)
     spec: dict[str, object] = {
         "inputs": inputs,
         "centers": fis.centers.detach().cpu().numpy().tolist(),
         "widths": widths.tolist(),
-        "consequents": fis.consequents.detach().cpu().numpy().reshape(-1).tolist(),
-        "linear_coefs": None if not linear else fis.lin.detach().cpu().numpy().reshape(len(fis.rule_idx), -1).tolist(),
-        "output_scale": float(fis.output_scale),
+        "consequents": fis.consequents.detach().cpu().numpy().reshape(len(fis.rule_idx), n_out).tolist(),
+        "linear_coefs": None if not linear else fis.lin.detach().cpu().numpy().reshape(len(fis.rule_idx), len(inputs) * n_out).tolist(),
+        "output_scale": float(fis.output_scale) if np.ndim(fis.output_scale) == 0 else fis.output_scale.tolist(),
+        "n_outputs": n_out,
         "bounded": bool(fis.bounded),
         "n_mfs": int(fis.n_mfs),
         "norm_mean": np.asarray(norm_mean).tolist(),
@@ -396,6 +446,11 @@ def fit_fuzzy(
     lr: float = 0.05,
     seed: int = 0,
     matured_from: date | None = None,
+    split_width: bool = False,
+    weight_decay: float = 0.0,
+    early_stopping_patience: int = 0,
+    val_fraction: float = 0.2,
+    class_shrinkage: float = 0.0,
 ) -> tuple[FuzzyParams, dict[str, object]]:
     """Train the fuzzy parameters on ``train_frame`` (base quantiles frozen).
 
@@ -405,6 +460,23 @@ def fit_fuzzy(
     systems (ablation); at h >= 30 the width system is volatility-only, so that
     arm then receives no width input at all. ``matured_from`` forwards a
     burn-in to :func:`compute_fuzzy_inputs`.
+
+    Optional refinements (all off by default, so the original arm is unchanged):
+
+    ``linear``
+        First-order Sugeno consequents (a linear term per rule) instead of the
+        zero-order constants.
+    ``split_width``
+        Two width outputs, one for the lower and one for the upper half of the
+        interval, instead of a single symmetric log multiplier.
+    ``weight_decay`` / ``early_stopping_patience``
+        Regularisation of the FIS parameters; early stopping holds out the last
+        ``val_fraction`` of fit dates (chronologically) and restores the best
+        validation-pinball parameters.
+    ``class_shrinkage``
+        Adds a per-class constant location/width offset, fitted jointly on the
+        fit rows with an L2 penalty of this strength pulling every offset to
+        zero (shrinkage toward the pooled system).
     """
     import torch
 
@@ -461,52 +533,139 @@ def fit_fuzzy(
     # the quantity they are shifting.
     s_scale = location_shift_bound(float(np.nanstd(y_ret)))
 
+    n_out_w = 2 if split_width else 1
+    w_scale: float | list[float] = [M_SCALE, M_SCALE] if split_width else M_SCALE
+
     device = torch.device("cpu")
-    width_fis = _sugeno_torch(len(width_cols), 3, linear, M_SCALE, True).to(device) if width_cols else None
+    width_fis = _sugeno_torch(len(width_cols), 3, linear, w_scale, True, n_out_w).to(device) if width_cols else None
     loc_fis = _sugeno_torch(len(loc_cols), 3, linear, s_scale, True).to(device) if loc_cols else None
 
-    params = []
+    params: list = []
     if width_fis is not None:
         params += list(width_fis.parameters())
     if loc_fis is not None:
         params += list(loc_fis.parameters())
-    if params:
-        opt = torch.optim.Adam(params, lr=lr)
-    else:
-        opt = None
+    opt = torch.optim.Adam(params, lr=lr, weight_decay=weight_decay) if params else None
 
     tw = torch.tensor((xw - w_mean) / w_std, dtype=torch.float32) if width_cols else None
     tl = torch.tensor((xl - l_mean) / l_std, dtype=torch.float32) if loc_cols else None
     tbase = torch.tensor(base, dtype=torch.float32)
     ty = torch.tensor(y_ret, dtype=torch.float32)
 
-    for _epoch in range(epochs):
+    def _quantiles(m, s):
+        p50 = tbase[:, 1] + s
+        if m.ndim == 2:
+            mult_lo = torch.exp(m[:, 0])
+            mult_hi = torch.exp(m[:, 1])
+        else:
+            mult_lo = mult_hi = torch.exp(m)
+        p10 = p50 - (tbase[:, 1] - tbase[:, 0]) * mult_lo
+        p90 = p50 + (tbase[:, 2] - tbase[:, 1]) * mult_hi
+        return torch.stack([p10, p50, p90], dim=1)
+
+    def _forward(xw_t, xl_t):
+        m = width_fis(xw_t) if width_fis is not None else torch.zeros(n)
+        s = loc_fis(xl_t) if loc_fis is not None else torch.zeros(n)
+        return m, s
+
+    # Chronological early-stopping holdout (the last dates of the fit window).
+    fit_mask = torch.ones(n, dtype=torch.bool)
+    val_mask = torch.zeros(n, dtype=torch.bool)
+    best_epoch = epochs
+    val_pinball = float("nan")
+    if early_stopping_patience > 0 and n >= 40:
+        dates = train["date"].to_numpy().astype("datetime64[D]")
+        uniq = np.unique(dates)
+        n_val = max(1, round(len(uniq) * val_fraction))
+        cutoff = uniq[-n_val]
+        val_mask = torch.tensor(dates >= cutoff)
+        fit_mask = ~val_mask
+
+    best_state = None
+    best_val = float("inf")
+    since_best = 0
+    for epoch in range(epochs):
         if opt is not None:
             opt.zero_grad()
-        m = width_fis(tw) if width_fis is not None else torch.zeros(n)
-        s = loc_fis(tl) if loc_fis is not None else torch.zeros(n)
-        p50 = tbase[:, 1] + s
-        mult = torch.exp(m)
-        p10 = p50 - (tbase[:, 1] - tbase[:, 0]) * mult
-        p90 = p50 + (tbase[:, 2] - tbase[:, 1]) * mult
-        pred = torch.stack([p10, p50, p90], dim=1)
-        loss = pinball_loss(pred, ty)
+        m, s = _forward(tw, tl)
+        if bool(fit_mask.any()):
+            loss = pinball_loss(_quantiles(m, s)[fit_mask], ty[fit_mask])
+        else:
+            loss = pinball_loss(_quantiles(m, s), ty)
         if opt is not None:
             loss.backward()
             opt.step()
+        if bool(val_mask.any()):
+            with torch.no_grad():
+                val_pinball = float(pinball_loss(_quantiles(m, s)[val_mask], ty[val_mask]).item())
+            if val_pinball < best_val - 1e-9:
+                best_val = val_pinball
+                best_epoch = epoch
+                since_best = 0
+                best_state = {
+                    "width": None if width_fis is None else {k: v.detach().clone() for k, v in width_fis.state_dict().items()},
+                    "loc": None if loc_fis is None else {k: v.detach().clone() for k, v in loc_fis.state_dict().items()},
+                }
+            else:
+                since_best += 1
+                if since_best >= early_stopping_patience:
+                    break
+
+    if best_state is not None:
+        if width_fis is not None and best_state["width"] is not None:
+            width_fis.load_state_dict(best_state["width"])
+        if loc_fis is not None and best_state["loc"] is not None:
+            loc_fis.load_state_dict(best_state["loc"])
 
     width_spec = _spec_from_torch(width_fis, width_cols, w_mean, w_std) if width_fis is not None else {
         "inputs": [], "centers": [], "widths": [], "consequents": [],
         "linear_coefs": None, "output_scale": M_SCALE, "bounded": True, "n_mfs": 3,
-        "norm_mean": [], "norm_std": [],
+        "n_outputs": 1, "norm_mean": [], "norm_std": [],
     }
     loc_spec = _spec_from_torch(loc_fis, loc_cols, l_mean, l_std) if loc_fis is not None else {
         "inputs": [], "centers": [], "widths": [], "consequents": [],
         "linear_coefs": None, "output_scale": s_scale, "bounded": True, "n_mfs": 3,
-        "norm_mean": [], "norm_std": [],
+        "n_outputs": 1, "norm_mean": [], "norm_std": [],
     }
 
+    class_adjust: dict[str, dict[str, object]] = {}
+    class_pinball = float("nan")
+    if class_shrinkage > 0:
+        classes = train["target_class"].to_numpy()
+        names = sorted({str(c) for c in classes})
+        idx = torch.tensor([names.index(str(c)) for c in classes], dtype=torch.long)
+        nc = len(names)
+        s_cls = torch.zeros(nc, requires_grad=True)
+        m_cls = torch.zeros(nc, n_out_w, requires_grad=True)
+        opt_c = torch.optim.Adam([s_cls, m_cls], lr=0.05)
+        with torch.no_grad():
+            m0, s0 = _forward(tw, tl)
+        for _ in range(200):
+            opt_c.zero_grad()
+            m = m0 + m_cls[idx]
+            s = s0 + s_cls[idx]
+            penalty = class_shrinkage * (((s_cls / s_scale) ** 2).sum() + (m_cls ** 2).sum())
+            loss = pinball_loss(_quantiles(m, s), ty) + penalty
+            loss.backward()
+            opt_c.step()
+        with torch.no_grad():
+            class_pinball = float(
+                pinball_loss(_quantiles(m0 + m_cls[idx], s0 + s_cls[idx]), ty).item()
+            )
+        s_np = s_cls.detach().numpy()
+        m_np = m_cls.detach().numpy()
+        class_adjust = {
+            name: {
+                "s": float(s_np[i]),
+                "m": float(m_np[i, 0]) if n_out_w == 1 else m_np[i].tolist(),
+            }
+            for i, name in enumerate(names)
+        }
+
     n_matured = train.join(inputs_all.select("date", "target_class", "n_matured"), on=["date", "target_class"], how="left")
+    with torch.no_grad():
+        m_fin, s_fin = _forward(tw, tl)
+        final_train_pinball = float(pinball_loss(_quantiles(m_fin, s_fin), ty).item())
     stats = {
         "h": h,
         "n_train": n,
@@ -515,11 +674,20 @@ def fit_fuzzy(
         "n_matured_mean": float(n_matured["n_matured"].mean()),
         "frac_rows_with_matured": float((n_matured["n_matured"] >= MIN_MATURED).mean()),
         "s_scale": s_scale,
-        "final_train_pinball": float(loss.item()),
+        "final_train_pinball": final_train_pinball,
+        "class_pinball": class_pinball,
         "width_inputs": width_cols,
         "loc_inputs": loc_cols,
+        "split_width": split_width,
+        "linear": linear,
+        "weight_decay": weight_decay,
+        "early_stopping_patience": early_stopping_patience,
+        "best_epoch": best_epoch,
+        "val_pinball": best_val if np.isfinite(best_val) else None,
+        "class_shrinkage": class_shrinkage,
+        "class_adjust": class_adjust,
     }
-    return {"h": h, "width": width_spec, "loc": loc_spec, "stats": stats}, stats
+    return {"h": h, "width": width_spec, "loc": loc_spec, "class_adjust": class_adjust or None, "stats": stats}, stats
 
 
 def save_params(params: FuzzyParams, name: str) -> Path:
