@@ -18,17 +18,17 @@ DATA = ROOT / "src" / "data"
 plt.rcParams.update({"font.size": 9, "axes.grid": True, "grid.alpha": 0.25})
 
 VALID_ARMS = [
-    ("base", "Base"),
+    ("base", "Base Forecaster"),
     ("const_wl", "Constant W+L"),
     ("linear_state", "Linear state"),
-    ("sugeno0", "Sugeno zero"),
-    ("sugeno_lin_split", "Sugeno selected"),
+    ("sugeno0", "Sugeno (0th-order)"),
+    ("sugeno_lin_split", "Sugeno (1st-order)"),
 ]
 VALID_COLORS = ["#6c757d", "#f0ad4e", "#5bc0de", "#9b59b6", "#2e8b57"]
 SIMPLE_LABELS = {
     "attr_constant_width": "Constant width",
     "attr_constant_width_location": "Constant W+L",
-    "attr_constant_width_rollbias": "Constant W+rolling bias",
+    "attr_constant_width_rollbias": "Constant W+rollbias",
     "attr_linear": "Linear state",
 }
 
@@ -44,17 +44,17 @@ def _row(frame: pl.DataFrame, **filters: object) -> dict[str, object]:
 def validation_pinball() -> None:
     """Plot pooled validation pinball by horizon for the main arms."""
     d = pl.read_csv(RUN / "calibration_ablation_valid.csv").filter(pl.col("scope") == "POOLED")
-    fig, axes = plt.subplots(2, 2, figsize=(10.0, 6.2))
+    fig, axes = plt.subplots(2, 2, figsize=(9.5, 6.0))
     for ax, h in zip(axes.ravel(), (1, 7, 30, 90)):
         values = [float(_row(d, h=h, arm=arm, scope="POOLED")["pinball_mean"]) for arm, _ in VALID_ARMS]
         labels = [label for _, label in VALID_ARMS]
-        ax.bar(np.arange(len(values)), values, color=VALID_COLORS)
-        ax.set_title(f"$h={h}$")
-        ax.set_xticks(np.arange(len(values)), labels, rotation=18, ha="right")
+        ax.bar(np.arange(len(values)), values, color=VALID_COLORS, width=0.6)
+        ax.set_title(f"$h={h}$ days")
+        ax.set_xticks(np.arange(len(values)), labels, rotation=15, ha="right")
         ax.set_ylabel("mean pinball")
         ax.set_ylim(0, max(values) * 1.18)
         for i, value in enumerate(values):
-            ax.text(i, value, f"{value:.5f}", ha="center", va="bottom", fontsize=6)
+            ax.text(i, value, f"{value:.5f}", ha="center", va="bottom", fontsize=6.5)
     fig.suptitle("Validation mean pinball loss (lower is better)")
     fig.tight_layout()
     fig.savefig(OUT / "paper_valid_pinball.png", dpi=220)
@@ -62,9 +62,12 @@ def validation_pinball() -> None:
 
 
 def test_pinball() -> None:
-    """Plot pooled test pinball for base, selected Sugeno, and best simple arm."""
+    """Plot pooled test pinball for base, Sugeno 0th, Sugeno 1st, and best simple arm."""
     base = pl.read_csv(DATA / "baseline_metrics_common.csv").filter(
         (pl.col("split") == "test") & (pl.col("scope") == "POOLED") & (pl.col("model") == "lstm")
+    )
+    sug0 = pl.read_csv(DATA / "baseline_metrics_common.csv").filter(
+        (pl.col("split") == "test") & (pl.col("scope") == "POOLED") & (pl.col("model") == "lstm_fuzzy")
     )
     selected = pl.read_csv(RUN / "calibration_test_selected.csv").filter(
         (pl.col("split") == "test") & (pl.col("scope") == "POOLED")
@@ -77,18 +80,20 @@ def test_pinball() -> None:
         best = simple.filter(pl.col("h") == h).sort("pinball_mean").row(0, named=True)
         values = [
             float(_row(base, h=h, model="lstm")["pinball_mean"]),
+            float(_row(sug0, h=h, model="lstm_fuzzy")["pinball_mean"]),
             float(_row(selected, h=h)["pinball_mean"]),
             float(best["pinball_mean"]),
         ]
-        labels = ["Base", "Sugeno selected", SIMPLE_LABELS[str(best["model"])]]
-        ax.bar(np.arange(3), values, color=["#6c757d", "#2e8b57", "#f0ad4e"])
-        ax.set_title(f"$h={h}$")
-        ax.set_xticks(np.arange(3), labels, rotation=12, ha="right")
+        labels = ["Base", "Sugeno 0th", "Sugeno 1st", SIMPLE_LABELS[str(best["model"])]]
+        colors = ["#6c757d", "#9b59b6", "#2e8b57", "#f0ad4e"]
+        ax.bar(np.arange(4), values, color=colors, width=0.6)
+        ax.set_title(f"$h={h}$ days")
+        ax.set_xticks(np.arange(4), labels, rotation=14, ha="right")
         ax.set_ylabel("mean pinball")
         ax.set_ylim(0, max(values) * 1.18)
         for i, value in enumerate(values):
             ax.text(i, value, f"{value:.5f}", ha="center", va="bottom", fontsize=6.5)
-    fig.suptitle("Test mean pinball loss (lower is better)")
+    fig.suptitle("Out-of-sample test mean pinball loss (lower is better)")
     fig.tight_layout()
     fig.savefig(OUT / "paper_test_pinball.png", dpi=220)
     plt.close(fig)
@@ -106,8 +111,8 @@ def test_coverage() -> None:
     base_cov = [float(_row(base, h=h, model="lstm")["cover_80"]) for h in horizons]
     sel_cov = [float(_row(selected, h=h)["cover_80"]) for h in horizons]
     fig, ax = plt.subplots(figsize=(6.8, 3.8))
-    ax.plot(horizons, base_cov, marker="o", color="#6c757d", label="Base")
-    ax.plot(horizons, sel_cov, marker="o", color="#2e8b57", label="Sugeno selected")
+    ax.plot(horizons, base_cov, marker="o", color="#6c757d", label="Base Forecaster")
+    ax.plot(horizons, sel_cov, marker="o", color="#2e8b57", label="Fuzzy Calibrator")
     ax.axhline(0.80, color="#c0392b", linestyle="--", linewidth=1, label="Nominal 0.80")
     ax.set_xticks(horizons, [f"$h={h}$" for h in horizons])
     ax.set_ylim(0.65, 1.02)
@@ -119,28 +124,28 @@ def test_coverage() -> None:
 
 
 def h90_class() -> None:
-    """Plot base and selected pinball by vessel class at the 90 day horizon."""
+    """Plot base and calibrated pinball by vessel class at the 90 day horizon."""
     base = pl.read_csv(DATA / "baseline_metrics_common.csv").filter(
         (pl.col("split") == "test") & (pl.col("h") == 90) & (pl.col("model") == "lstm") & (pl.col("scope") != "POOLED")
     )
     selected = pl.read_csv(RUN / "calibration_test_selected.csv").filter(
         (pl.col("split") == "test") & (pl.col("h") == 90) & (pl.col("scope") != "POOLED")
     )
-    order = ["Capesize", "Panamax", "Supramax", "Handysize"]
+    order = ["Capesize", "Panamax", "Supramax"]
     base_vals = [float(_row(base, scope=cls)["pinball_mean"]) for cls in order]
     sel_vals = [float(_row(selected, scope=cls)["pinball_mean"]) for cls in order]
     x = np.arange(len(order))
     fig, ax = plt.subplots(figsize=(7.2, 3.8))
-    ax.bar(x - 0.19, base_vals, width=0.36, color="#6c757d", label="Base")
-    ax.bar(x + 0.19, sel_vals, width=0.36, color="#2e8b57", label="Sugeno selected")
+    ax.bar(x - 0.19, base_vals, width=0.36, color="#6c757d", label="Base Forecaster")
+    ax.bar(x + 0.19, sel_vals, width=0.36, color="#2e8b57", label="Sugeno (1st-order)")
     ax.set_xticks(x, order)
     ax.set_ylabel("mean pinball")
     ax.set_ylim(0, max(base_vals + sel_vals) * 1.18)
-    ax.set_title("$h=90$ test pinball by vessel class")
+    ax.set_title("$h=90$ days test pinball by vessel class")
     ax.legend()
     for i, (b, s) in enumerate(zip(base_vals, sel_vals)):
-        ax.text(i - 0.19, b, f"{b:.3f}", ha="center", va="bottom", fontsize=6.5)
-        ax.text(i + 0.19, s, f"{s:.3f}", ha="center", va="bottom", fontsize=6.5)
+        ax.text(i - 0.19, b, f"{b:.3f}", ha="center", va="bottom", fontsize=7)
+        ax.text(i + 0.19, s, f"{s:.3f}", ha="center", va="bottom", fontsize=7)
     fig.tight_layout()
     fig.savefig(OUT / "paper_h90_class.png", dpi=220)
     plt.close(fig)

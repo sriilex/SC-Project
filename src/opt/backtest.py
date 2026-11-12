@@ -366,7 +366,7 @@ def _summarise_strategy(
 def summarise(
     rows: list[BacktestRow],
     contract_term_days: int,
-    classes: Sequence[str] = ("ALL", "Capesize", "Panamax", "Supramax", "Handysize"),
+    classes: Sequence[str] = ("ALL", "Capesize", "Panamax", "Supramax"),
 ) -> list[BacktestSummary]:
     """Compute summary stats for all strategies and vessel classes.
 

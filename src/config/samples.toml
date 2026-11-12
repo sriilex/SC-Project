@@ -9,7 +9,6 @@ samples_manifest = "src/data/samples_manifest.csv"
 BC_INDEX = "Capesize"
 BPI_INDEX = "Panamax"
 BSI_INDEX = "Supramax"
-BHSI_INDEX = "Handysize"
 
 [targets.horizons]
 days = [1, 7, 30, 90]

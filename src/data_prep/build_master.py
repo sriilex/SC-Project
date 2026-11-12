@@ -32,7 +32,6 @@ INVESTING_SERIES: Final[dict[str, str]] = {
     "capesize": "BC_INDEX",
     "panamax": "BPI_INDEX",
     "supramax": "BSI_INDEX",
-    "handysize": "BHSI_INDEX",
 }
 
 MASTER_SCHEMA: Final[dict[str, pl.DataType]] = {
@@ -93,20 +92,18 @@ def read_investing_dir(path: Path) -> pl.DataFrame:
 def read_handybulk(path: Path) -> pl.DataFrame:
     """Melt the HandyBulk wide extract into index-point and TC-average series."""
     wide = pl.read_csv(path, schema_overrides={c: pl.Float64 for c in [
-        "bdi", "bci", "bpi", "bsi", "bhsi",
+        "bdi", "bci", "bpi", "bsi",
         "capesize_tc_avg_usd_day", "panamax_tc_avg_usd_day",
-        "supramax_tc_avg_usd_day", "handysize_tc_avg_usd_day",
+        "supramax_tc_avg_usd_day",
     ]})
     mapping: Final[dict[str, tuple[str, str]]] = {
         "bdi": ("BD_INDEX", "index_pts"),
         "bci": ("BC_INDEX", "index_pts"),
         "bpi": ("BPI_INDEX", "index_pts"),
         "bsi": ("BSI_INDEX", "index_pts"),
-        "bhsi": ("BHSI_INDEX", "index_pts"),
         "capesize_tc_avg_usd_day": ("CAPESIZE_TCAVG", "usd/day"),
         "panamax_tc_avg_usd_day": ("PANAMAX_TCAVG", "usd/day"),
         "supramax_tc_avg_usd_day": ("SUPRAMAX_TCAVG", "usd/day"),
-        "handysize_tc_avg_usd_day": ("HANDYSIZE_TCAVG", "usd/day"),
     }
     frames: list[pl.DataFrame] = []
     for col, (series_id, unit) in mapping.items():

@@ -39,7 +39,7 @@ EXCLUDE: Final[frozenset[str]] = frozenset(
     {"date", "target_value", "log_value", "target_class"}
 ) | _TARGET_COLS
 
-CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax", "Handysize")
+CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax")
 CLASS_CODES: Final[dict[str, int]] = {c: i for i, c in enumerate(CLASSES)}
 
 #: Default training seeds. A single seed keeps iteration fast; pass a longer

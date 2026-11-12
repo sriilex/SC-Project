@@ -17,7 +17,7 @@ REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 DATA: Final[Path] = REPO_ROOT / "src" / "data"
 
 MODELS: Final[tuple[str, ...]] = ("lstm", "lstm_fuzzy", "cqr", "aci")
-CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax", "Handysize")
+CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax")
 
 
 def _fmt(value: float | None, nd: int = 5) -> str:

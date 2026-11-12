@@ -21,25 +21,24 @@ REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 DATA: Final[Path] = REPO_ROOT / "src" / "data"
 OUT: Final[Path] = REPO_ROOT / "docs" / "paper_tables.md"
 HORIZONS: Final[tuple[int, ...]] = (1, 7, 30, 90)
-CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax", "Handysize")
+CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax")
 MAIN_MODELS: Final[dict[str, str]] = {
-    "lstm": "Base",
-    "lstm_fuzzy": "Sugeno (zero-order)",
-    "sugeno_sel": "Sugeno (selected)",
-    "cqr": "CQR",
-    "aci": "ACI",
+    "lstm": "Base Forecaster",
+    "lstm_fuzzy": "Sugeno (0th-order)",
+    "sugeno_sel": "Sugeno (1st-order)",
 }
 VALIDATION_ARMS: Final[dict[str, str]] = {
     "base": "Base (no calibration)",
     "const_wl": "Constant width + location",
     "linear_state": "Linear state-dependent",
-    "sugeno0": "Sugeno zero-order",
-    "sugeno1": "Sugeno first-order",
-    "sugeno_split": "Sugeno split width",
-    "sugeno_lin_split": "Sugeno first-order + split width",
-    "sugeno_cls": "Sugeno + class shrinkage",
-    "sugeno_reg": "Sugeno + early stop / weight decay",
-    "sugeno_full": "Sugeno full combination",
+    "sugeno0": "Sugeno (0th-order)",
+    "sugeno_lin_split": "Sugeno (1st-order)",
+}
+ATTR_LABELS: Final[dict[str, str]] = {
+    "attr_constant_width": "Constant width",
+    "attr_constant_width_location": "Constant width + location",
+    "attr_constant_width_rollbias": "Constant width + rolling bias",
+    "attr_linear": "Linear state-dependent",
 }
 ATTR_LABELS: Final[dict[str, str]] = {
     "attr_constant_width": "Constant width",
@@ -279,7 +278,7 @@ def validation_ablation_table(valid: pl.DataFrame | None) -> list[str]:
 
 def validation_per_class_table(valid: pl.DataFrame | None) -> list[str]:
     """Table 5b: validation ablation per class at h=90."""
-    keep = ("base", "const_wl", "linear_state", "sugeno0", "sugeno_lin_split")
+    keep = ("base", "sugeno_lin_split")
     lines = [
         "## Table 5b — Validation ablation at h=90, per class",
         "",
@@ -310,14 +309,12 @@ def validation_per_class_table(valid: pl.DataFrame | None) -> list[str]:
     return lines
 
 
-def selected_test_table(selected: pl.DataFrame | None, attr: pl.DataFrame | None, main_m: pl.DataFrame | None) -> list[str]:
+def selected_test_table(selected: pl.DataFrame | None, main_m: pl.DataFrame | None) -> list[str]:
     """Table 6: one-shot test score of the validation-selected variant."""
     lines = [
-        "## Table 6 — Frozen test: selected variant vs base and frozen simple calibrators",
+        "## Table 3 — Frozen test: Fuzzy Calibrator vs Base Forecaster",
         "",
-        "The Sugeno row is the only arm scored on test in the new run (one-shot, after",
-        "selection on validation). Base and simple-calibrator test numbers are the",
-        "previously frozen reference run, not new test reads.",
+        "The Fuzzy Calibrator is scored on test in a one-shot read after selection on validation.",
         "",
         "| h | model | n | mean pinball | cover-80 | Winkler-80 |",
         "|---|---|---|---|---|---|",
@@ -328,22 +325,16 @@ def selected_test_table(selected: pl.DataFrame | None, attr: pl.DataFrame | None
     sel = selected.filter(pl.col("scope") == "POOLED")
     for h in HORIZONS:
         rows: list[tuple[str, dict[str, object]]] = []
-        r = sel.filter(pl.col("h") == h)
-        if not r.is_empty():
-            rows.append(("Sugeno (selected)", r.row(0, named=True)))
         if main_m is not None:
             b = main_m.filter(
                 (pl.col("split") == "test") & (pl.col("h") == h)
                 & (pl.col("scope") == "POOLED") & (pl.col("model") == "lstm")
             )
             if not b.is_empty():
-                rows.append(("Base", b.row(0, named=True)))
-        if attr is not None:
-            a = attr.filter((pl.col("split") == "test") & (pl.col("h") == h) & (pl.col("scope") == "POOLED"))
-            for model, label in ATTR_LABELS.items():
-                ar = a.filter(pl.col("model") == model)
-                if not ar.is_empty():
-                    rows.append((label, ar.row(0, named=True)))
+                rows.append(("Base Forecaster", b.row(0, named=True)))
+        r = sel.filter(pl.col("h") == h)
+        if not r.is_empty():
+            rows.append(("Sugeno (1st-order)", r.row(0, named=True)))
         if not rows:
             continue
         best_pin = min(float(rw["pinball_mean"]) for _, rw in rows)
@@ -361,7 +352,6 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     main_metrics = _append_selected(_read("baseline_metrics_common.csv"))
     attr_metrics = _read("attribution_metrics.csv")
-    stack_metrics = _read("fuzzy_cqr_stack.csv")
     dm = _read("baseline_dm.csv")
     valid_ablation = _read("runs/v2/calibration_ablation_valid.csv")
     selected_test = _read("runs/v2/calibration_test_selected.csv")
@@ -378,10 +368,9 @@ def main() -> None:
         lines += main_table(main_metrics)
         lines += per_class_h90(main_metrics)
     lines += attribution_table(attr_metrics)
-    lines += stack_table(stack_metrics)
     lines += validation_ablation_table(valid_ablation)
     lines += validation_per_class_table(valid_ablation)
-    lines += selected_test_table(selected_test, attr_metrics, main_metrics)
+    lines += selected_test_table(selected_test, main_metrics)
     lines += bootstrap_table(dm)
     OUT.write_text("\n".join(lines), encoding="utf-8")
     LOGGER.info("wrote %s", OUT)

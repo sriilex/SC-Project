@@ -13,7 +13,6 @@ class VesselClass(str, Enum):
     CAPESIZE = "Capesize"
     PANAMAX = "Panamax"
     SUPRAMAX = "Supramax"
-    HANDYSIZE = "Handysize"
 
 class ForecastFan(BaseModel):
     model_config = ConfigDict(frozen=True)

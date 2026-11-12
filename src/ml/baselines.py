@@ -60,7 +60,7 @@ HORIZONS: Final[tuple[int, ...]] = (1, 7, 30, 90)
 QUANTILES: Final[tuple[float, ...]] = (0.1, 0.5, 0.9)
 #: Miscoverage level of the reported central interval (P10-P90, i.e. 80%).
 INTERVAL_ALPHA: Final[float] = 0.2
-CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax", "Handysize")
+CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax")
 
 
 def _setup_logging() -> None:
