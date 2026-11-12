@@ -137,132 +137,92 @@ The sequence branch receives a 120-day window of the class's own `log_value`. Th
 
 Training uses pinball loss on per-class and per-horizon standardised returns. We train for at most 100 epochs with batch size 64, gradient clipping at 1.0, and early stopping on the last 15 percent of training dates. The learning rate is 0.001 for 1 and 7 days and 0.0001 for 30 and 90 days. The frozen reference run uses five seeds and averages the resulting quantiles. The current default is one seed for speed.
 
-## 5. The Fuzzy Calibration Layer
+## 5. Fuzzy Calibration Layer
 
-The base model gives us a forecast, but its interval may be too wide or too narrow, and its median may be biased. The calibration layer tries to fix both without retraining the base. It contains two small Takagi-Sugeno systems per horizon: one for width and one for location.
+### 5.1 What the layer corrects
 
-The layer is deliberately small. Each system uses Gaussian memberships, a product t-norm, weighted-average defuzzification, and a 3x3 rule base. At 1 and 7 days the width system uses a coverage gap and volatility. At 30 and 90 days the coverage gap is too noisy, so the width system uses volatility only. The location system uses a median bias and volatility at every horizon.
+- The frozen base outputs P10, P50, P90 per class and horizon, but its intervals are miscalibrated: over-covered at long horizons, and the median is sometimes persistently biased in one direction.
+- The layer corrects two quantities per forecast:
+  - **Width**: how wide the interval should be, via a multiplier on each half-width.
+  - **Location**: where the median should sit, via a shift.
+- The correction is state-dependent: it is computed from recent forecast performance and current market volatility, not from a fixed multiplier.
+- The base network stays frozen. Only the layer is fit. Reason: base and layer remain separately attributable, and calibration never risks the base model.
 
-### 5.1 Causal inputs
+### 5.2 State signals
 
-The calibration features use only forecasts that have matured. A forecast issued at time $t$ for horizon $h$ matures at $t+h$. At issuance time $t$, the inputs may use only forecasts issued at or before $t-h$. This prevents the layer from using an outcome that would not yet be known in deployment.
+The layer reads three signals at each issuance date $t$. All three are computable at time $t$ without knowing the future.
 
-The matured window is:
-
-$$
-N(h) = \max(60, 5h)
-$$
-
-calendar days, with at least five matured forecast-outcome pairs. The window is 60 days at 1 and 7 days, 150 days at 30 days, and 450 days at 90 days. If fewer than five matured pairs are available, the layer returns the identity correction.
-
-The coverage gap and median bias are:
+- **Coverage gap** $g_t$: over the last $N_t$ matured forecast-outcome pairs, the fraction of outcomes outside $[\hat q_{0.1}, \hat q_{0.9}]$, minus 0.20. Positive means under-coverage. Reason: a direct measure of whether the base interval is currently the right width.
 
 $$
 g_t = \frac{1}{N_t}\sum_{i \in \mathcal{W}_t}
-\left[\mathbf{1}\{y_i < \hat q_{0.1,i}\} + \mathbf{1}\{y_i > \hat q_{0.9,i}\}\right] - 0.20,
+\left[\mathbf{1}\{y_i < \hat q_{0.1,i}\} + \mathbf{1}\{y_i > \hat q_{0.9,i}\}\right] - 0.20
 $$
+
+- **Median bias** $b_t$: mean of $(y_i - \hat q_{0.5,i})$ over the same window, divided by its standard deviation. Positive means the median has been too low. Reason: scale-free, so it is comparable across classes and horizons.
 
 $$
 b_t = \frac{\operatorname{mean}_{i \in \mathcal{W}_t}(y_i - \hat q_{0.5,i})}
-{\operatorname{sd}_{i \in \mathcal{W}_t}(y_i - \hat q_{0.5,i})},
+{\operatorname{sd}_{i \in \mathcal{W}_t}(y_i - \hat q_{0.5,i})}
 $$
 
-where $\mathcal{W}_t$ is the matured window. A positive coverage gap means the interval under-covers. A positive bias means the median has been too low. The volatility feature is the trailing 14-day standard deviation of daily log-level changes, z-scored against strictly earlier data.
+- **Volatility**: standard deviation of trailing 14-day daily log-level changes, z-scored against strictly-past data. Reason: interval width should track the current market state.
+- **Maturity rule**: a forecast issued at $t$ for horizon $h$ matures at $t+h$. At time $t$, the layer uses only forecasts issued on or before $t - h$. Reason: in deployment, later outcomes are not yet known; using them would leak.
+- **Window**: $N(h) = \max(60, 5h)$ calendar days, at least 5 matured pairs, otherwise the layer outputs the identity. Reason: long horizons produce matured pairs less frequently and need a longer window; 5 pairs is the minimum for a stable fraction or z-score.
 
-### 5.2 Sugeno mechanics
+### 5.3 System design
 
-For input vector $x$ and rule $r$ with membership indices $k_j$, the Gaussian membership and firing strength are:
+The system is a Takagi-Sugeno (T-S) fuzzy system mapping the signal vector $x$ to the correction.
 
-$$
-\mu_{j,k}(x_j) = \exp\left(-\frac{(x_j - c_{j,k})^2}{2\sigma_{j,k}^2}\right),
-\qquad
-w_r = \prod_{j=1}^{p}\mu_{j,k_j}(x_j).
-$$
+- Mechanics, in order of computation:
+  - Gaussian antecedents per input: $\mu_{j,k}(x_j) = \exp\left(-(x_j - c_{j,k})^2 / (2\sigma_{j,k}^2)\right)$. Reason: smooth and differentiable, so the layer trains by gradient descent; centres and widths are directly readable.
+  - Product t-norm: rule firing $w_r = \prod_j \mu_{j,k_j}(x_j)$, normalized to $\bar w_r$. Reason: overlapping memberships interpolate smoothly instead of switching rules on and off.
+  - Consequents: constant for 0th order, $f_r = c_r$; linear for 1st order, $f_r = c_r + \sum_j a_{rj} x_j$. The 0th order is readable, one constant per rule; the 1st order can tilt with the inputs.
+  - Weighted-average defuzzification: $\hat y = \sum_r \bar w_r f_r$. Reason: output is a smooth function of the inputs, and a bounded output layer can be applied on top.
+- Rule base: 3x3 for two-input systems, 3 rules for volatility-only width. Reason: small enough to audit rule by rule, large enough to respond locally.
+- Why a fuzzy system and not a plain linear model: the design goal is a bounded, auditable, state-dependent correction, and a rule table gives a local description with bounded outputs. Whether this beats a simpler linear correction is an empirical question; the answer is in Section 7.2.
+- Inputs per horizon:
+  - Width, 1-day and 7-day: coverage gap + volatility.
+  - Width, 30-day and 90-day: volatility only. Reason: at long horizons few pairs have matured, so the coverage gap is too noisy to drive the rules.
+  - Location, all horizons: median bias + volatility.
 
-The normalized firing and defuzzified output are:
+### 5.4 Applying the correction
 
-$$
-\bar w_r = \frac{w_r}{\sum_{r'} w_{r'}},
-\qquad
-\hat y = \sum_r \bar w_r f_r.
-$$
-
-In a zero-order system the consequent is a constant, $f_r = c_r$. In a first-order system it is a local linear model:
-
-$$
-f_r = c_r + \sum_{j=1}^{p} a_{rj} x_j.
-$$
-
-The zero-order system is easier to read because each rule has one constant. The first-order system is more flexible because each rule can tilt with the inputs.
-
-```mermaid
-flowchart TD
-  A["Coverage gap or bias"] --> B["Gaussian memberships"]
-  C["Volatility"] --> B
-  B --> D["Product t-norm"]
-  D --> E["Rule firing"]
-  E --> F["Weighted-average defuzzification"]
-  F --> G["Constant or linear consequents"]
-  G --> H["Bounded tanh output"]
-  H --> I["Width multiplier or location shift"]
-  I --> J["Adjusted P10, P50, P90"]
-```
-
-*Figure 3. Sugeno calibration layer. Width and location share the same machinery but have separate inputs and consequents.*
-
-### 5.3 Applying the correction
-
-The selected variant uses first-order consequents and separate lower and upper width multipliers. The correction is:
+The 7 Sugeno arms differ only in consequent order and width structure. The selected variant uses 1st-order consequents and separate lower and upper multipliers; it outputs a shift $s$ and multipliers $m_{\text{lo}}, m_{\text{hi}}$:
 
 $$
 \hat q'_{0.5} = \hat q_{0.5} + s,
 $$
 
 $$
-\hat q'_{0.1} = \hat q'_{0.5} - (\hat q_{0.5} - \hat q_{0.1})e^{m_{\text{lo}}},
+\hat q'_{0.1} = \hat q'_{0.5} - (\hat q_{0.5} - \hat q_{0.1})\, e^{m_{\text{lo}}},
 \qquad
-\hat q'_{0.9} = \hat q'_{0.5} + (\hat q_{0.9} - \hat q_{0.5})e^{m_{\text{hi}}}.
+\hat q'_{0.9} = \hat q'_{0.5} + (\hat q_{0.9} - \hat q_{0.5})\, e^{m_{\text{hi}}}.
 $$
 
-The shift moves the median and the endpoints together. The multipliers scale the lower and upper half-widths separately, so the interval can become asymmetric. Ordering is preserved because each multiplier is positive. If $m_{\text{lo}}=m_{\text{hi}}=0$ and $s=0$, the adjusted quantiles equal the base quantiles.
+- Separate lower and upper multipliers. Reason: the interval can become asymmetric around the shifted median.
+- Exponential multiplier. Reason: $e^m > 0$ always, so $\hat q'_{0.1} < \hat q'_{0.5} < \hat q'_{0.9}$ is preserved for any output; no sorting step is needed.
+- The shift moves all three quantiles as a block, so widths are not distorted by the location correction.
+- Bounds, applied via tanh:
+  - $m = 0.7\tanh(\cdot)$, so $e^m \in [0.50, 2.01]$: the half-width can shrink by at most half or expand by at most 2x.
+  - $s = 2.2\sigma_h \tanh(\cdot)$, where $\sigma_h$ is the pooled standard deviation of base median error at horizon $h$ on the calibration window: the shift is at most about 2 standard deviations of the base error.
+  - Reason: one extreme state should not produce an absurd interval.
+- Identity property: if all consequents are zero then $m_{\text{lo}} = m_{\text{hi}} = s = 0$, and the corrected quantiles equal the base quantiles.
 
-The outputs are bounded:
+### 5.5 Training the layer
 
-$$
-m = 0.7\tanh(\cdot), \qquad s = 2.2\sigma_h\tanh(\cdot),
-$$
+- Free parameters: consequent constants, one slope per input per rule (1st-order only), antecedent centres, antecedent widths.
+- Initialisation: consequents at 0, antecedents on an evenly spaced grid. The untrained layer is exactly the identity. Reason: zero is a valid fallback, so the layer can only deviate from the base if the fit justifies it.
+- Fit on validation only, pinball loss, full-batch Adam, learning rate 0.05, 600 epochs. Reason: the test split is read once, at the end, so no test data may touch training, early stopping, or model selection.
+- Ten arms share the same frozen base predictions, the same fit split, the same objective, learning rate, epoch budget, and seed. Reason: differences between arms then come only from the arm design.
+  - Base arm: no calibration. Reference for every comparison.
+  - Two ordinary calibrators: constant width + location shift, and linear state dependence. Reason: isolate what a state-dependent correction can achieve without fuzzy machinery.
+  - Seven Sugeno variants: 0th-order consequents, 1st-order consequents, split width, shrunk class offsets, weight decay with early stopping, the full combination, and 1st-order + split width. Each isolates one design choice.
+- Selection rule: lowest mean pooled validation pinball, tie-break on mean Winkler. Only the winner is scored on test, once. Reason: a single test read keeps the test estimate honest.
 
-so $e^m$ lies between approximately 0.50 and 2.01. Here $\sigma_h$ is the pooled standard deviation of the base median error at horizon $h$ on the calibration window. The bound prevents one extreme state from producing an absurd interval.
+## 6. Evaluation
 
-### 5.4 Training the layer
-
-The base model is frozen. Only the calibration layer is trained. The free parameters are the consequent constants, the antecedent centres and widths, and, in the first-order variant, one linear coefficient per input and rule. The consequents start at zero and the antecedents start on an evenly spaced grid, so the untrained layer is exactly the identity.
-
-The layer is trained on validation with pinball loss. We use full-batch Adam with learning rate 0.05 for 600 epochs. No test data are used for training, early stopping, or hyperparameter selection. The selected arm is fitted once more on validation and then scored once on test.
-
-Table 3 collects the main settings in one place.
-
-**Table 3. Main settings.**
-
-| Component | Setting |
-|---|---|
-| Tools | Polars, PyTorch, Matplotlib, uv |
-| Base sequence | 120-day class log level |
-| Base backbone | 1D CNN 64 channels; 2-layer BiLSTM hidden 32; additive attention |
-| Base head | Monotone P10, P50, P90 |
-| Base training | Adam; batch 64; at most 100 epochs; patience 8; gradient clip 1.0 |
-| Base ensemble | 5 seeds, averaged quantiles |
-| Calibration memberships | Gaussian |
-| Calibration t-norm | Product |
-| Calibration defuzzification | Weighted average |
-| Calibration rule base | 3x3; 3 rules for volatility-only width |
-| Calibration training | Full-batch Adam; learning rate 0.05; 600 epochs |
-| Calibration bounds | $m = 0.7\tanh(\cdot)$; $s = 2.2\sigma_h\tanh(\cdot)$ |
-| Calibration data | Validation only, base frozen |
-
-## 6. How We Test It
-
-A quantile forecast is scored with pinball loss. For quantile level $q \in \{0.1, 0.5, 0.9\}$:
+- **Pinball loss**, the standard quantile score, averaged over $q \in \{0.1, 0.5, 0.9\}$, the four classes, and the evaluation rows:
 
 $$
 \rho_q(y, \hat q) =
@@ -272,11 +232,9 @@ q(y - \hat q), & y \ge \hat q, \\
 \end{cases}
 $$
 
-For $q=0.9$, an under-forecast is penalised nine times more heavily than an over-forecast. For $q=0.1$, the reverse happens. We average the loss over the three quantiles, the four classes, and the evaluation rows.
-
-The 80 percent interval is $[\hat q_{0.1}, \hat q_{0.9}]$. Empirical coverage is the fraction of rows with $\hat q_{0.1} \le y \le \hat q_{0.9}$. Coverage is informative but is not a scoring rule by itself, because an interval can hit nominal coverage by being unnecessarily wide.
-
-The Winkler score evaluates the two endpoints jointly. At the 80 percent level:
+  At $q = 0.9$ an under-forecast is penalised nine times more than an over-forecast; at $q = 0.1$ the reverse. Lower is better.
+- **Coverage**: fraction of rows with $\hat q_{0.1} \le y \le \hat q_{0.9}$, nominal 0.80. Diagnostic only. Reason: an interval can hit nominal coverage by being unnecessarily wide, so coverage is not a scoring rule.
+- **Winkler score**: interval width plus penalties for misses at both ends; evaluates the two endpoints jointly. Lower is better.
 
 $$
 W = (\hat q_{0.9} - \hat q_{0.1})
@@ -284,48 +242,47 @@ W = (\hat q_{0.9} - \hat q_{0.1})
 + \frac{2}{0.2}(y - \hat q_{0.9})\mathbf{1}\{y > \hat q_{0.9}\}.
 $$
 
-Lower is better for both pinball loss and Winkler score.
-
-We compare ten calibration arms on validation. The base arm has no post-hoc calibration. Two ordinary calibrators isolate a constant width plus location shift and a linear state-dependent correction. Seven Sugeno variants isolate zero-order consequents, first-order consequents, split width, shrunk class offsets, weight decay with early stopping, the full combination, and the first-order plus split-width combination.
-
-Every arm uses the same frozen base predictions, the same validation fit split, the same objective, learning rate, epoch budget, and initialisation seed. The winner is chosen by the lowest mean pooled validation pinball loss, with the mean Winkler score as a tie-breaker. Only that variant is scored on test. The unselected Sugeno arms therefore have no new test result.
-
-For the simple calibrators we quote the previously frozen reference run, which used the same base predictions and the same protocol. That run contains four simple calibrators: constant width, constant width plus location, constant width plus rolling-bias correction, and linear state dependence. This is why the test comparison can include simple calibrators that are not part of the new ten-arm validation ablation.
-
-The primary uncertainty estimate is a date-block bootstrap. We resample consecutive blocks of dates with replacement and keep all four classes together inside each block. This preserves cross-class correlation and within-block time dependence. We report 95 percent percentile intervals for the difference between the Sugeno layer and the base, using a block length equal to the horizon with a floor of five days. We do not lead with row-wise p-values, because rows overlap at long horizons and the effective sample is much smaller than the row count.
+- **Uncertainty**: date-block bootstrap. Resample consecutive blocks of dates with all four classes kept together inside each block; block length equals the horizon with a floor of five days; report 95 percent percentile intervals for the layer-minus-base difference. Reason: rows overlap at long horizons and classes are correlated, so row-level p-values would overstate the effective sample.
 
 ## 7. Results
 
-### 7.1 Validation: the fuzzy layer wins
+### 7.1 Validation
 
-The validation-selected arm is first-order consequents with separate lower and upper width multipliers. It has the lowest mean pooled validation pinball of any arm, 0.03201, against 0.04158 for the base and 0.03693 for the linear state-dependent calibrator. It is best at every horizon, with reductions against the base of 4.0, 6.9, 20.0, and 33.5 percent at 1, 7, 30, and 90 days. Its coverage is 0.755, 0.792, 0.805, and 0.861, closer to nominal than the base at every horizon.
+The selected arm is 1st-order consequents with split width.
+
+- Best at every horizon. Mean pooled pinball 0.03201, against 0.04158 for the base and 0.03693 for the linear state-dependent calibrator.
+- Reductions against the base: 4.0, 6.9, 20.0, and 33.5 percent at 1, 7, 30, and 90 days.
+- Coverage 0.755, 0.792, 0.805, 0.861: closer to nominal than the base at every horizon.
 
 ![Validation pinball](figures/paper_valid_pinball.png)
 
-*Figure 4. Pooled validation mean pinball by horizon. Lower is better. The selected first-order plus split-width arm is best at every horizon.*
+*Figure 3. Pooled validation mean pinball by horizon. Lower is better. The selected arm is best at every horizon.*
 
-**Table 4. Pooled validation mean pinball.**
+**Table 3. Pooled validation mean pinball.**
 
-| Horizon | Base | Constant W+L | Linear state | Sugeno zero | Sugeno selected |
+| Horizon | Base | Constant W+L | Linear state | Sugeno 0th | Sugeno selected |
 |---:|---:|---:|---:|---:|---:|
 | 1 | 0.00770 | 0.00768 | 0.00767 | 0.00750 | 0.00740 |
 | 7 | 0.02610 | 0.02599 | 0.02590 | 0.02478 | 0.02429 |
 | 30 | 0.06065 | 0.05960 | 0.05722 | 0.05185 | 0.04853 |
 | 90 | 0.07188 | 0.06361 | 0.05694 | 0.05109 | 0.04781 |
 
-First-order consequents are the largest single improvement over the zero-order arm: mean pooled pinball falls from 0.03381 to 0.03230. Split width alone gives 0.03371, and the combination gives 0.03201. Shrunk per-class offsets barely change the fit, because the L2 penalty pulls them close to zero. Early stopping with weight decay is the worst Sugeno variant, at 0.03608. The full combination inherits that, at 0.03569. The chronological holdout contains few matured long-horizon outcomes and stops the fit too early. This is a negative result for early stopping in this sample, not evidence that regularisation is generally harmful.
+- Ablations, mean pooled pinball:
+  - 0th-order to 1st-order: 0.03381 to 0.03230. The largest single improvement.
+  - Split width alone: 0.03371. Combined with 1st-order: 0.03201.
+  - Shrunk class offsets: barely change the fit, because the L2 penalty pulls them close to zero.
+  - Weight decay with early stopping: the worst Sugeno arm at 0.03608; the full combination inherits it at 0.03569. The chronological holdout has few matured long-horizon outcomes and stops the fit too early. A negative result in this sample, not evidence that regularisation is generally harmful.
+- The 90-day win is not one class's win: the selected arm is best in Capesize, Panamax, and Handysize, and in Supramax it is 0.03447 against 0.03430 for the 0th-order arm.
 
-The validation table is the only selection basis. At 90 days the selected arm is best in Capesize, Panamax, and Handysize, and narrowly behind the zero-order arm in Supramax, 0.03447 against 0.03430. The pooled advantage is not driven by one class.
+### 7.2 Test
 
-### 7.2 Test: the ranking does not transfer
-
-The selected arm is scored once on the frozen test split. The base and simple-calibrator rows come from the frozen reference run.
+One-shot read on the frozen test split. The base and simple-calibrator rows come from the frozen reference run, which used the same base predictions and the same protocol.
 
 ![Test pinball](figures/paper_test_pinball.png)
 
-*Figure 5. Pooled test mean pinball for the base, the selected Sugeno arm, and the best frozen simple calibrator at each horizon. Lower is better.*
+*Figure 4. Pooled test mean pinball. Lower is better.*
 
-**Table 5. Pooled test mean pinball. Lower is better.**
+**Table 4. Pooled test mean pinball.**
 
 | Horizon | Base | Sugeno selected | Constant width | Constant W+L | Rolling bias | Linear state |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -334,25 +291,20 @@ The selected arm is scored once on the frozen test split. The base and simple-ca
 | 30 | 0.04833 | 0.05138 | 0.04573 | 0.04576 | 0.04547 | 0.04464 |
 | 90 | 0.06914 | 0.05957 | 0.05810 | 0.05207 | 0.05872 | 0.05302 |
 
-At 1 day, the selected layer moves coverage from 0.837 to 0.749 and worsens both pinball loss and Winkler score. The base is closer to nominal at this horizon, so the state features mainly add variance. At 7 days, coverage moves from 0.908 to 0.793, but pinball loss rises from 0.02200 to 0.02561 and Winkler from 0.3293 to 0.4018. At 30 days, the layer over-corrects: coverage falls from 0.939 to 0.709, pinball loss is 6.3 percent worse than the base, and Winkler is 2.7 percent better only because the interval is narrower.
-
-At 90 days, the layer helps. The base is severely over-covered at 0.991 with Winkler 1.1143. The selected variant reduces pinball from 0.06914 to 0.05957, a 13.8 percent reduction, and Winkler from 1.1143 to 0.8001, a 28.2 percent reduction, while moving coverage to 0.793. Mean interval width falls from 1.1102 to 0.5776. This is the only horizon where the selected layer improves on all three quantities.
-
-The simple calibrators are the harder result. Every one of the four beats the selected fuzzy layer at every test horizon. Constant width plus location wins at 1 and 90 days, constant width wins at 7 days, and linear state dependence wins at 30 days with 0.04464. The validation and test rankings are therefore inconsistent.
+- 1 day: coverage moves from 0.837 to 0.749, pinball and Winkler both worsen. The base is already close to nominal, so the state features mainly add variance.
+- 7 days: coverage moves from 0.908 to 0.793, but pinball rises from 0.02200 to 0.02561 and Winkler from 0.3293 to 0.4018.
+- 30 days: over-correction. Coverage falls from 0.939 to 0.709, pinball is 6.3 percent worse than the base, and Winkler is 2.7 percent better only because the interval is narrower.
+- 90 days: the only win. The base is severely over-covered at 0.991 with Winkler 1.1143. The layer cuts pinball from 0.06914 to 0.05957 (13.8 percent), cuts Winkler from 1.1143 to 0.8001 (28.2 percent), moves coverage to 0.793, and shrinks mean width from 1.1102 to 0.5776. The only horizon where it improves all three quantities.
+- **Attribution result**: all four frozen simple calibrators beat the selected fuzzy layer at every test horizon. Constant W+L wins at 1 and 90 days, constant width at 7 days, linear state at 30 days with 0.04464.
+- The validation and test rankings disagree. A validation win did not predict a test win.
 
 ![Test coverage](figures/paper_test_coverage.png)
 
-*Figure 6. Pooled test coverage of the 80 percent interval. The base over-covers, most severely at 90 days. The selected arm moves coverage close to nominal at 7 and 90 days but under-covers at 30 days.*
+*Figure 5. Pooled test coverage of the 80 percent interval. The base over-covers, most severely at 90 days.*
 
 ### 7.3 Per class at 90 days
 
-The selected variant improves on the base for Capesize, Panamax, and Supramax, but is worse for Handysize, from 0.0392 to 0.0457. This is the same qualitative failure as the zero-order fit, although smaller. Coverage is clearly better than the zero-order fit: all four classes land between 0.785 and 0.797, whereas the zero-order layer drove Handysize coverage to 0.531. Split width therefore fixes the worst coverage failure without making the Handysize point score competitive.
-
-![Per-class h90](figures/paper_h90_class.png)
-
-*Figure 7. Test mean pinball at 90 days by vessel class. The selected arm improves three classes and worsens Handysize.*
-
-**Table 6. Per-class results at 90 days on test.**
+**Table 5. Test results at 90 days by class.**
 
 | Class | Base pinball | Selected pinball | Selected cover-80 | Selected Winkler |
 |---|---:|---:|---:|---:|
@@ -361,25 +313,31 @@ The selected variant improves on the base for Capesize, Panamax, and Supramax, b
 | Supramax | 0.0525 | 0.0445 | 0.785 | 0.6062 |
 | Handysize | 0.0392 | 0.0457 | 0.796 | 0.6444 |
 
-Handysize vessels have different route structures, congestion exposure, and volatility. A pooled layer can learn a correction that works for Capesize and Panamax but is wrong for Handysize. Shrinking per-class offsets did not fix this on validation, so the issue is not a simple class-level location or width offset. Class-specific rule bases may help, but the effective sample is small and would invite overfitting.
+- The layer improves on Capesize, Panamax, and Supramax, and worsens on Handysize, 0.0392 to 0.0457.
+- Coverage for all four classes lands between 0.785 and 0.797, whereas the 0th-order fit drove Handysize coverage to 0.531. Split width therefore fixes the worst coverage failure without making the Handysize point score competitive.
+- Handysize has a different route structure, congestion exposure, and volatility, so a pooled layer learns a correction that helps Capesize and Panamax and is wrong for Handysize. Shrunk per-class offsets did not fix this on validation, so it is not a simple class-level offset. Class-specific rule bases would fit on too few samples.
 
-### 7.4 What the layer learned
+![Per-class h90](figures/paper_h90_class.png)
 
-The audit uses the zero-order reference fit because a zero-order rule table can be read as one consequent per rule. The validation-selected first-order model replaces each constant with a linear consequent, so its rule base has one intercept and one slope per input per rule and cannot be summarised as a short table of constants. The statements about which rules fire, and about the width system collapsing to one rule at 90 days, are properties of the antecedents and apply to both fits.
+*Figure 6. Test mean pinball at 90 days by class. The selected arm improves three classes and worsens Handysize.*
+
+### 7.4 Interpretability audit
+
+Audited on the 0th-order reference fit, because one constant per rule can be read as a table. Firing properties apply to both fits; the 1st-order fit adds a slope per input per rule and cannot be summarised as constants.
 
 ![Membership functions at h=1](figures/fuzzy_v2_membership_h1.png)
 
 ![Membership functions at h=90](figures/fuzzy_v2_membership_h90.png)
 
-*Figure 8. Zero-order reference membership functions at 1 and 90 days. At 90 days the width system has one broad low-volatility membership, which explains why it behaves like a single rule.*
+*Figure 7. 0th-order reference membership functions at 1 and 90 days. At 90 days the width system has one broad low-volatility membership, so it behaves like a single rule.*
 
-At 1 day, the width system is spread across several rules. The most active rule has mean firing 0.571 and a negative consequent of -0.214, so it shrinks the interval when the coverage gap and volatility are low, a state where the base tends to over-cover. The high-gap/high-volatility rule has the expected positive consequent of +0.940, but exceeds firing 0.05 on only 2.6 percent of test rows. The mixed signs mean that the 1-day rule base is not a monotone coverage correction.
+- 1 day, width: several rules fire with mixed signs. The most active rule has mean firing 0.571 and consequent -0.214, so it shrinks the interval when the coverage gap and volatility are low, the state where the base tends to over-cover. The high-gap, high-volatility rule has the expected positive consequent of +0.940 but exceeds firing 0.05 on only 2.6 percent of test rows. Not a monotone coverage correction.
+- 90 days, width: effectively one rule. The low-volatility membership has mean firing 0.999, the other two fire on less than 1 percent of rows, and the consequent is -3.236, a mean multiplier of 0.498. The width layer acts as a near-constant shrink factor, not a state-dependent rule.
+- 90 days, location: positive average shift of +0.087, several rules fire, but the high-bias rules do not all have positive consequents.
 
-At 90 days, the width system is effectively a single rule. The low-volatility membership has mean firing 0.999, the other two memberships fire on less than 1 percent of rows, and the consequent is -3.236. The width layer therefore acts as a near-constant shrink factor, not a state-dependent width rule. The location system is more active, with a positive average shift of +0.087, but its high-bias rules do not all have positive consequents. The rule base is a pooled fit, not a causal model.
+**Table 6. Audit summary for the 0th-order reference fit.**
 
-**Table 7. Audit summary for the zero-order reference fit.**
-
-| Horizon | System | Effective behaviour | Mean width multiplier or shift |
+| Horizon | System | Effective behaviour | Mean multiplier or shift |
 |---:|---|---|---:|
 | 1 | Width | Several rules fire; mixed signs | 0.899 |
 | 7 | Width | Several rules fire; mixed signs | 0.958 |
@@ -387,30 +345,32 @@ At 90 days, the width system is effectively a single rule. The low-volatility me
 | 90 | Width | One rule fires on essentially all rows | 0.498 |
 | 90 | Location | Several rules fire; mixed signs | +0.087 |
 
-## 8. What We Learned
+- The rule table describes which states the layer responds to. It does not recover a stable economic mechanism, and the response is not uniformly monotone.
 
-The results are mixed, and that is the main message. The enriched Sugeno layer wins the validation ablation: first-order consequents with separate lower and upper width multipliers give the lowest mean pooled pinball of any arm at every horizon, beating the base, the constant calibrator, and the linear state-dependent calibrator. The same arm on the frozen test improves on the base only at 90 days and is worse at 1, 7, and 30 days. A validation win on a one-year calibration window did not predict a test win. Selection noise and regime shift are large relative to the differences between these arms.
+## 8. Discussion
 
-The attribution comparison remains the most informative negative result. Every simple calibrator beats the selected fuzzy layer at every test horizon on both pinball loss and Winkler score. At 30 days, the linear state-dependent calibrator is best, which shows that state dependence has value but does not require fuzzy memberships or a rule base. At 90 days, constant width plus a constant location shift is best, which shows that the long-horizon gain comes mostly from correcting location, not from a state-dependent width rule.
-
-The disagreement between splits is itself a finding. On validation the selected arm improves over the base by 4.0 to 33.5 percent. On test it is 8.3 percent worse at 1 day, 16.4 percent worse at 7 days, 6.3 percent worse at 30 days, and 13.8 percent better at 90 days. The calibration problem changes between periods. The base over-covers at most horizons in both periods, but much more severely on test at 90 days. A rule fitted on a short validation window therefore does not transfer uniformly. The per-class results add a second warning: the layer helps three classes at 90 days and hurts Handysize, so pooling has a visible cost.
-
-The learned rules are only partly interpretable. At 90 days, the zero-order width system is effectively one rule that shrinks the interval by about half, so it is not state-dependent at the long horizon. At 1 day, several width rules fire with mixed signs, so the rule base is not a monotone coverage correction. The location system at 90 days has a positive average shift, but its high-bias rules do not all have positive consequents. We do not claim that the rules recover a stable economic mechanism. They describe which states the layer responds to, and that response is not uniformly monotone. We also do not recommend width-only calibration as a default: width alone leaves test pinball at 0.05810 at 90 days, while adding location lowers it to 0.05207.
+- The results are mixed, and that is the main message.
+- The fuzzy arm wins the validation ablation at every horizon, then improves on the base only at 90 days on test. On validation it beats the base by 4.0 to 33.5 percent; on test it is 8.3 percent worse at 1 day, 16.4 percent worse at 7 days, 6.3 percent worse at 30 days, and 13.8 percent better at 90 days. The gaps between arms are small relative to selection noise and regime shift.
+- The attribution result is the most informative negative result: every simple calibrator beats the selected fuzzy layer at every test horizon, on pinball and on Winkler.
+  - Linear state wins at 30 days: state dependence has value, but does not require fuzzy memberships or a rule base.
+  - Constant W+L wins at 90 days: the long-horizon gain comes mostly from correcting location, not from a state-dependent width rule.
+- The disagreement between splits is itself a finding. The base over-covers at most horizons in both periods, but much more severely on test at 90 days, so a rule fitted on a short validation window does not transfer uniformly.
+- Do not recommend width-only calibration as a default: at 90 days, width alone leaves test pinball at 0.05810, while adding location lowers it to 0.05207.
 
 ## 9. Limitations
 
-The first limitation is the single episode. One chronological split and one test period mean that the results are conditional on one market regime. The validation-to-test up-rate shift is a confound for the long-horizon location correction, and the disagreement between the validation and test rankings is consistent with it. We do not know whether a different episode would favour the fuzzy arm.
-
-The second limitation is selection noise. Ten arms were scored on one validation window, and the winner was selected on a point estimate without a formal correction for selection. The top five validation arms differ by only 0.03201 to 0.03381, so the identity of the winner is not stable. The chosen arm was then fitted again and scored once on test, which gives an honest one-shot estimate but does not correct for the fact that it was chosen. A nested or rolling-origin protocol would be needed to quantify selection bias.
-
-The third limitation is the small effective sample. At 90 days, targets overlap heavily and the four classes are correlated, so the common-support sample of 571 overstates the independent information. The date-block bootstrap respects this dependence but cannot create information that is not there. The calendar-day horizon also interacts with the weekday-biased mask: a 30-day horizon can land on a weekend or holiday, and the mask retains under half of the eligible rows at 30 days. A trading-day horizon would avoid this but change the economic interpretation. One data caveat is that the PortWatch publication lag is undocumented, so the main run's same-day congestion features may be optimistic.
-
-The fourth limitation is staged training and maturity. The base is frozen when the calibration layer is trained, so joint training might improve prediction but would blur attribution. The calibrator also needs matured labels, so at 90 days it cannot use the most recent 90 days of outcomes. A method that calibrates without waiting for maturity would be more responsive.
-
-The fifth limitation is audit scope. We report one calibration fit per arm, impose no sign or monotonicity constraints, and do not estimate consequent stability across seeds or rolling windows. Early stopping and weight decay did not help, but the holdout was noisy at long horizons. The class-aware arm used a fixed shrinkage strength and produced offsets close to zero. We test only four simple calibrators, so a more flexible non-fuzzy calibrator is not ruled out.
+- **Single episode.** One chronological split and one test period, so the results are conditional on one market regime. The validation-to-test up-rate shift confounds the long-horizon location correction, and the split disagreement is consistent with it.
+- **Selection noise.** Ten arms scored on one validation window, winner chosen on a point estimate with no correction for selection. The top five arms differ by only 0.03201 to 0.03381, so the identity of the winner is not stable. A nested or rolling-origin protocol would be needed to quantify selection bias.
+- **Small effective sample.** At 90 days targets overlap heavily and the four classes are correlated, so the common-support sample of 571 overstates the independent information. The date-block bootstrap respects the dependence but cannot create information. The calendar-day horizon interacts with the weekday-biased mask: a 30-day target can land on a weekend or holiday, and the mask keeps under half of the eligible rows at 30 days. A trading-day horizon would avoid this but change the economic interpretation.
+- **Data caveat.** The PortWatch publication lag is undocumented, so same-day congestion features may be optimistic.
+- **Staged training and maturity.** Freezing the base preserves attribution, but joint training might improve prediction. The calibrator needs matured labels, so at 90 days it cannot use the most recent 90 days of outcomes. A method that calibrates without waiting for maturity would be more responsive.
+- **Audit scope.** One fit per arm, no sign or monotonicity constraints, no consequent stability across seeds or windows, four simple calibrators only. A more flexible non-fuzzy calibrator is not ruled out.
 
 ## 10. Conclusion
 
-We studied state-dependent Sugeno fuzzy calibration of quantile forecasts for four dry bulk vessel-class indices. The base model is a pooled quantile CNN-BiLSTM-attention network with a monotone head and a five-seed ensemble. The calibration layer is a pair of small Takagi-Sugeno systems that map matured coverage and bias signals, together with volatility, to a bounded width multiplier and location shift. It is the identity before training, bounded and continuous, and trained on validation with the base frozen.
-
-The validation ablation is positive for the fuzzy structure: first-order consequents with separate width multipliers beat the base by 4.0 to 33.5 percent in pooled pinball across horizons, and beat both constant and linear state-dependent corrections at every horizon. The one-shot test is not: the selected arm improves on the base only at 90 days, and four frozen simple calibrators beat it at every horizon. The richer fuzzy arm improves long-horizon behaviour and fixes the zero-order Handysize coverage collapse, but it does not overturn the attribution result. A multi-episode, pre-registered protocol with nested selection, class-aware calibration, and a sign-constrained rule audit is the next step.
+- State-dependent Sugeno calibration of quantile forecasts for four dry bulk vessel-class indices: a pair of small T-S systems on a frozen CNN-BiLSTM-attention base, mapping matured coverage and bias signals plus volatility to a bounded width multiplier and location shift.
+- Identity before training, bounded and continuous, fitted on validation only.
+- Validation: the selected arm beats the base by 4.0 to 33.5 percent at every horizon, and beats the constant and linear calibrators at every horizon.
+- Test: the selected arm improves only at 90 days, and four simple calibrators beat it at every horizon.
+- The fuzzy layer is a compact, auditable correction. The experiment does not show that fuzzy structure is necessary.
+- Next step: a multi-episode, pre-registered protocol with nested selection, class-aware calibration, and a sign-constrained rule audit.
