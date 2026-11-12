@@ -42,8 +42,9 @@ EXCLUDE: Final[frozenset[str]] = frozenset(
 CLASSES: Final[tuple[str, ...]] = ("Capesize", "Panamax", "Supramax", "Handysize")
 CLASS_CODES: Final[dict[str, int]] = {c: i for i, c in enumerate(CLASSES)}
 
-#: Default number of independently seeded LSTM ensembles.
-DEFAULT_SEEDS: Final[tuple[int, ...]] = (0, 1, 2, 3, 4)
+#: Default training seeds. A single seed keeps iteration fast; pass a longer
+#: tuple explicitly to train a seed ensemble.
+DEFAULT_SEEDS: Final[tuple[int, ...]] = (0,)
 
 #: Seconds without a per-epoch heartbeat before the watchdog aborts the run.
 #: A hard GPU stall leaves no other way to reclaim the process; per-epoch

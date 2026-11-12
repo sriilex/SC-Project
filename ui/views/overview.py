@@ -125,7 +125,7 @@ Quantile ordering is preserved by construction and the learned rules stay readab
             """
 | Method | Adjustment |
 |---|---|
-| **Base** | none (5-seed ensemble) |
+| **Base** | none (single-seed LSTM) |
 | **CQR** | split-conformal interval shift |
 | **ACI** | online, bounded coverage tracking |
 | **Sugeno** | learned rule gate on coverage, vol, bias |

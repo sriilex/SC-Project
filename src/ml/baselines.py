@@ -1,7 +1,7 @@
 """Pooled quantile baselines over the sample splits.
 
 Benchmarks and calibration layers:
-  lstm             five-seed monotone quantile LSTM ensemble
+  lstm             monotone quantile LSTM (one seed by default)
   lstm_fuzzy       new Sugeno layer (Task F)
   lstm_fuzzy_old   original constant-shift fuzzy layer (ablation)
   const_shift      raw LSTM + median residual shift (calibration split)
@@ -30,6 +30,9 @@ import polars as pl
 import scoringrules as sr
 
 from ml.conformal import (
+    ACI_GAMMA,
+    ACI_SCORE_BUFFER,
+    ACI_WARMUP,
     aci_adjust,
     apply_const_shift,
     apply_cqr,
@@ -39,6 +42,7 @@ from ml.conformal import (
 from ml.evaluation import (
     aligned_losses,
     block_bootstrap_ci,
+    date_block_bootstrap_ci,
     date_cluster_bootstrap_ci,
     dm_test,
     write_markdown_summary,
@@ -280,7 +284,6 @@ def main() -> None:
     all_rows: list[dict[str, object]] = []
     sign_rows: list[dict[str, object]] = []
     aci_rows: list[dict[str, object]] = []
-    fuzzy_spread_rows: list[dict[str, object]] = []
     pred_store: dict[tuple[str, int, str], pl.DataFrame] = {}
 
     def record(model_name: str, split_name: str, pred: pl.DataFrame) -> None:
@@ -343,6 +346,10 @@ def main() -> None:
                                 "score_min": float(sc.min()) if sc.size else float("nan"),
                                 "score_max": float(sc.max()) if sc.size else float("nan"),
                                 "n_scores": int(sc.size),
+                                "gamma": float(st.get("gamma", ACI_GAMMA)),
+                                "warmup": int(st.get("warmup", ACI_WARMUP)),
+                                "score_buffer": int(st.get("score_buffer", ACI_SCORE_BUFFER)),
+                                "n_pending": len(st.get("pending", [])),
                             })
 
         # 2c. New Sugeno fuzzy layer, trained on valid, frozen for test.
@@ -370,31 +377,6 @@ def main() -> None:
                     history = _context_frame(mean_preds, splits, hist_names, h)
                     cal = fuzzy_calibrate(mean_preds[split_name][h], history, h, params, matured_from=valid_start)
                     record("lstm_fuzzy", split_name, cal)
-
-                # Calibrator seed spread: the reported model is seed 0; seeds
-                # 1-4 show how sensitive the layer is to its initialisation.
-                seed_models: dict[int, object] = {0: params}
-                for seed in (1, 2, 3, 4):
-                    seed_params, _ = fit_fuzzy(
-                        context, train_frame, h, seed=seed, matured_from=valid_start
-                    )
-                    seed_models[seed] = seed_params
-                for seed, seed_params in seed_models.items():
-                    for split_name in eval_splits:
-                        hist_names = ["train", "valid"] + (["test"] if (split_name == "test" and "test" in splits) else [])
-                        history = _context_frame(mean_preds, splits, hist_names, h)
-                        cal = fuzzy_calibrate(
-                            mean_preds[split_name][h], history, h, seed_params,
-                            matured_from=valid_start,
-                        )
-                        for r in evaluate(cal, splits[split_name], split_name, "lstm_fuzzy"):
-                            if r["scope"] != "POOLED":
-                                continue
-                            fuzzy_spread_rows.append({
-                                "split": split_name, "h": h, "seed": seed, "n": r["n"],
-                                "pinball_mean": r["pinball_mean"],
-                                "cover_80": r["cover_80"], "width": r["width"],
-                            })
 
     metrics = pl.DataFrame(all_rows).sort(["split", "h", "model", "scope"])
     out_path = DATA / "baseline_metrics.csv"
@@ -457,20 +439,6 @@ def main() -> None:
         LOGGER.info("wrote %s (%d rows)", aci_path, aci_df.height)
         LOGGER.info("ACI final state:\n%s", aci_df)
 
-    if fuzzy_spread_rows:
-        spread_path = DATA / "fuzzy_seed_spread.csv"
-        spread_df = pl.DataFrame(fuzzy_spread_rows).sort(["split", "h", "seed"])
-        spread_df.write_csv(spread_path)
-        agg = spread_df.group_by(["split", "h"]).agg(
-            pl.col("pinball_mean").min().alias("pinball_min"),
-            pl.col("pinball_mean").max().alias("pinball_max"),
-            pl.col("pinball_mean").std().alias("pinball_sd"),
-            pl.col("cover_80").min().alias("cover_min"),
-            pl.col("cover_80").max().alias("cover_max"),
-        ).sort(["split", "h"])
-        LOGGER.info("wrote %s (%d rows)", spread_path, spread_df.height)
-        LOGGER.info("fuzzy calibrator seed spread:\n%s", agg)
-
     # Diebold-Mariano + block bootstrap: lstm_fuzzy vs its competitors.
     dm_rows: list[dict[str, object]] = []
     for split_name in eval_splits:
@@ -485,12 +453,31 @@ def main() -> None:
                 for q in (0.1, 0.5, 0.9, None):
                     la, lb, j = aligned_losses(pred_store[base_key], pred_store[comp_key], splits[split_name], h, q)
                     dm = dm_test(la, lb, h)
-                    boot = date_cluster_bootstrap_ci(la - lb, j["date"].to_numpy())
-                    block = block_bootstrap_ci(la - lb, block=max(h, 5))
+                    diff = la - lb
+                    dates = j["date"].to_numpy()
+                    # Primary interval: date-block bootstrap (consecutive date
+                    # blocks, all four classes move together). The independent
+                    # date-cluster and moving-block intervals are kept as
+                    # sensitivity checks, not as the headline.
+                    primary_block = max(h, 5)
+                    n_dates = int(j["date"].n_unique())
+                    large_block = min(2 * primary_block, max(primary_block, n_dates // 3))
+                    cluster = date_cluster_bootstrap_ci(diff, dates)
+                    block = date_block_bootstrap_ci(diff, dates, block_length=primary_block)
+                    block_small = date_block_bootstrap_ci(diff, dates, block_length=max(5, h // 2))
+                    block_large = date_block_bootstrap_ci(diff, dates, block_length=large_block)
+                    row_row = block_bootstrap_ci(diff, block=primary_block)
                     dm_rows.append({
                         "split": split_name, "h": h, "competitor": comp,
-                        "quantile": "mean" if q is None else q, **dm, **boot,
-                        "block_lo": block["boot_lo"], "block_hi": block["boot_hi"],
+                        "quantile": "mean" if q is None else q, **dm,
+                        "boot_lo": block["boot_lo"], "boot_hi": block["boot_hi"],
+                        "boot_block": primary_block,
+                        "boot_large_block": large_block,
+                        "boot_n_blocks": block["n_blocks"],
+                        "block_small_lo": block_small["boot_lo"], "block_small_hi": block_small["boot_hi"],
+                        "block_large_lo": block_large["boot_lo"], "block_large_hi": block_large["boot_hi"],
+                        "cluster_lo": cluster["boot_lo"], "cluster_hi": cluster["boot_hi"],
+                        "row_block_lo": row_row["boot_lo"], "row_block_hi": row_row["boot_hi"],
                     })
     if dm_rows:
         dm_df = pl.DataFrame(dm_rows)

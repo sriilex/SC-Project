@@ -1,0 +1,16 @@
+{
+  "generated_at": "2026-11-12T19:02:00",
+  "test_included": true,
+  "horizons": [
+    1,
+    7,
+    30,
+    90
+  ],
+  "cqr_split": "valid",
+  "fuzzy_split": "valid",
+  "fuzzy_base": "CQR-calibrated frozen LSTM fan",
+  "matured_from": "2023-01-03",
+  "coverage_guarantee": "fuzzy stage does not inherit CQR's guarantee",
+  "note": "post-hoc stacked arm; pre-register before treating as established"
+}

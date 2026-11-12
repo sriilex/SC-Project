@@ -1,0 +1,253 @@
+{
+  "generated_at": "2026-11-12T18:59:35",
+  "test_included": true,
+  "horizons": [
+    1,
+    7,
+    30,
+    90
+  ],
+  "kinds": [
+    "constant_width",
+    "constant_width_location",
+    "constant_width_rollbias",
+    "linear"
+  ],
+  "objective": "pinball_0.1_0.5_0.9",
+  "fit_split": "valid",
+  "base": "frozen five-seed LSTM ensemble",
+  "bounds": "same tanh-bounded width and location maps as the Sugeno layer",
+  "tuning_budget": "one fixed configuration per baseline (600 full-batch Adam epochs, lr 0.05); no per-baseline hyperparameter search",
+  "params": {
+    "constant_width_h1": {
+      "kind": "constant_width",
+      "h": 1,
+      "n_train": 982,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": -0.06370371389122295,
+      "s": null,
+      "rollbias_coef": null,
+      "width_coefs": null,
+      "loc_coefs": null,
+      "final_train_pinball": 0.0076916092075407505
+    },
+    "constant_width_location_h1": {
+      "kind": "constant_width_location",
+      "h": 1,
+      "n_train": 982,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": -0.0777146965396333,
+      "s": -0.0009831466022695128,
+      "rollbias_coef": null,
+      "width_coefs": null,
+      "loc_coefs": null,
+      "final_train_pinball": 0.007683324161916971
+    },
+    "constant_width_rollbias_h1": {
+      "kind": "constant_width_rollbias",
+      "h": 1,
+      "n_train": 982,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": -0.04819046933971867,
+      "s": null,
+      "rollbias_coef": 0.013163466937839985,
+      "width_coefs": null,
+      "loc_coefs": null,
+      "final_train_pinball": 0.007673274725675583
+    },
+    "linear_h1": {
+      "kind": "linear",
+      "h": 1,
+      "n_train": 982,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": 0.0,
+      "s": null,
+      "rollbias_coef": null,
+      "width_coefs": [
+        -0.0499274767935276,
+        -0.013241936452686787
+      ],
+      "loc_coefs": [
+        0.011742331087589264,
+        -0.0032104533165693283
+      ],
+      "final_train_pinball": 0.007666247431188822
+    },
+    "constant_width_h7": {
+      "kind": "constant_width",
+      "h": 7,
+      "n_train": 1190,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": -0.1038856808384033,
+      "s": null,
+      "rollbias_coef": null,
+      "width_coefs": null,
+      "loc_coefs": null,
+      "final_train_pinball": 0.02599099837243557
+    },
+    "constant_width_location_h7": {
+      "kind": "constant_width_location",
+      "h": 7,
+      "n_train": 1190,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": -0.10100807803473043,
+      "s": 0.0008716059197180563,
+      "rollbias_coef": null,
+      "width_coefs": null,
+      "loc_coefs": null,
+      "final_train_pinball": 0.02598990872502327
+    },
+    "constant_width_rollbias_h7": {
+      "kind": "constant_width_rollbias",
+      "h": 7,
+      "n_train": 1190,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": -0.10708368935064795,
+      "s": null,
+      "rollbias_coef": 0.010712634772062302,
+      "width_coefs": null,
+      "loc_coefs": null,
+      "final_train_pinball": 0.02596571296453476
+    },
+    "linear_h7": {
+      "kind": "linear",
+      "h": 7,
+      "n_train": 1190,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": 0.0,
+      "s": null,
+      "rollbias_coef": null,
+      "width_coefs": [
+        -0.05872480571269989,
+        -0.06680531799793243
+      ],
+      "loc_coefs": [
+        0.01065904088318348,
+        -0.009194597601890564
+      ],
+      "final_train_pinball": 0.02590073272585869
+    },
+    "constant_width_h30": {
+      "kind": "constant_width",
+      "h": 30,
+      "n_train": 717,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": -0.17932676044028434,
+      "s": null,
+      "rollbias_coef": null,
+      "width_coefs": null,
+      "loc_coefs": null,
+      "final_train_pinball": 0.0595952607691288
+    },
+    "constant_width_location_h30": {
+      "kind": "constant_width_location",
+      "h": 30,
+      "n_train": 717,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": -0.18255211391515705,
+      "s": -0.0012717849770589892,
+      "rollbias_coef": null,
+      "width_coefs": null,
+      "loc_coefs": null,
+      "final_train_pinball": 0.05959612503647804
+    },
+    "constant_width_rollbias_h30": {
+      "kind": "constant_width_rollbias",
+      "h": 30,
+      "n_train": 717,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": -0.19019840918679826,
+      "s": null,
+      "rollbias_coef": 0.014252684079110622,
+      "width_coefs": null,
+      "loc_coefs": null,
+      "final_train_pinball": 0.05953080579638481
+    },
+    "linear_h30": {
+      "kind": "linear",
+      "h": 30,
+      "n_train": 717,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": 0.0,
+      "s": null,
+      "rollbias_coef": null,
+      "width_coefs": [
+        0.07814715057611465
+      ],
+      "loc_coefs": [
+        0.023628126829862595,
+        -0.11642281711101532
+      ],
+      "final_train_pinball": 0.05722300708293915
+    },
+    "constant_width_h90": {
+      "kind": "constant_width",
+      "h": 90,
+      "n_train": 970,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": -0.5031814148990201,
+      "s": null,
+      "rollbias_coef": null,
+      "width_coefs": null,
+      "loc_coefs": null,
+      "final_train_pinball": 0.06633578985929489
+    },
+    "constant_width_location_h90": {
+      "kind": "constant_width_location",
+      "h": 90,
+      "n_train": 970,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": -0.585432386674523,
+      "s": 0.07687873732519654,
+      "rollbias_coef": null,
+      "width_coefs": null,
+      "loc_coefs": null,
+      "final_train_pinball": 0.06361132115125656
+    },
+    "constant_width_rollbias_h90": {
+      "kind": "constant_width_rollbias",
+      "h": 90,
+      "n_train": 970,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": -0.5149106141458581,
+      "s": null,
+      "rollbias_coef": -0.05943929776549339,
+      "width_coefs": null,
+      "loc_coefs": null,
+      "final_train_pinball": 0.06550095975399017
+    },
+    "linear_h90": {
+      "kind": "linear",
+      "h": 90,
+      "n_train": 970,
+      "epochs": 600,
+      "lr": 0.05,
+      "m": 0.0,
+      "s": null,
+      "rollbias_coef": null,
+      "width_coefs": [
+        -0.6609761714935303
+      ],
+      "loc_coefs": [
+        -0.5001923441886902,
+        -0.18691444396972656
+      ],
+      "final_train_pinball": 0.05693958327174187
+    }
+  }
+}

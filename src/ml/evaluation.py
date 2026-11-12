@@ -158,6 +158,57 @@ def date_cluster_bootstrap_ci(
     }
 
 
+def date_block_bootstrap_ci(
+    d: np.ndarray,
+    dates: np.ndarray,
+    block_length: int = 5,
+    n_boot: int = 2000,
+    seed: int = 0,
+) -> dict[str, float]:
+    """Moving-block bootstrap over *consecutive dates*, keeping classes together.
+
+    Every unique date is one cluster. The ordered list of dates is cut into
+    blocks of ``block_length`` consecutive dates, and whole blocks are resampled
+    with replacement. All rows on the selected dates (the four vessel classes)
+    enter and leave together, so both cross-class same-date correlation and
+    local temporal dependence are preserved. This is the primary interval; the
+    independent date-cluster bootstrap is retained only as a sensitivity check.
+    """
+    d = np.asarray(d, dtype=float)
+    dates = np.asarray(dates)
+    if d.size < 5 or d.size != dates.size:
+        return {
+            "boot_lo": float("nan"), "boot_hi": float("nan"),
+            "boot_mean": float("nan"), "n_blocks": 0, "block_length": block_length,
+        }
+    unique_dates, inv = np.unique(dates, return_inverse=True)
+    n_dates = unique_dates.size
+    block = max(1, min(int(block_length), n_dates))
+    if n_dates < 2:
+        return {
+            "boot_lo": float("nan"), "boot_hi": float("nan"),
+            "boot_mean": float("nan"), "n_blocks": 0, "block_length": block,
+        }
+    groups = [np.flatnonzero(inv == k) for k in range(n_dates)]
+    starts = np.arange(0, n_dates - block + 1) if n_dates >= block else np.array([0])
+    n_blocks = math.ceil(n_dates / block)
+    rng = np.random.default_rng(seed)
+    means = np.empty(n_boot)
+    for i in range(n_boot):
+        picked = rng.choice(starts, size=n_blocks, replace=True)
+        idx = np.concatenate(
+            [np.concatenate(groups[s : s + block]) for s in picked]
+        )
+        means[i] = d[idx].mean()
+    return {
+        "boot_lo": float(np.quantile(means, 0.025)),
+        "boot_hi": float(np.quantile(means, 0.975)),
+        "boot_mean": float(means.mean()),
+        "n_blocks": n_blocks,
+        "block_length": block,
+    }
+
+
 def write_markdown_summary(
     metrics: pl.DataFrame,
     dm: pl.DataFrame,
@@ -192,12 +243,14 @@ def write_markdown_summary(
         lines.append(
             "DM p-values are reported for completeness only. With overlapping 90-day "
             "targets and four correlated classes the row count vastly overstates the "
-            "effective sample, so the date-cluster bootstrap interval is the primary "
-            "evidence and the DM test is demoted to this appendix."
+            "effective sample, so the date-block bootstrap interval is the primary "
+            "evidence and the DM test is demoted to this appendix. The block length is "
+            "max(h, 5) consecutive dates; smaller/larger block lengths and an "
+            "independent date-cluster interval are written to the CSV as sensitivity checks."
         )
         lines.append("")
-        lines.append("| split | h | competitor | quantile | mean diff | DM stat | p | date-boot 2.5% | date-boot 97.5% |")
-        lines.append("|-------|---|------------|----------|-----------|---------|---|----------------|-----------------|")
+        lines.append("| split | h | competitor | quantile | mean diff | DM stat | p | date-block 2.5% | date-block 97.5% |")
+        lines.append("|-------|---|------------|----------|-----------|---------|---|-----------------|------------------|")
         for r in dm.sort(["split", "h", "quantile", "competitor"]).iter_rows(named=True):
             lines.append(
                 f"| {r['split']} | {r['h']} | {r['competitor']} | {r['quantile']} | {r['dm_mean_diff']:+.5f} "

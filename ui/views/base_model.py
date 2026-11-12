@@ -43,7 +43,7 @@ def _crossing_table() -> pl.DataFrame:
 def render() -> None:
     st.title("Base Model Calibration")
     st.caption(
-        "The object being calibrated: a five-seed monotone quantile LSTM. "
+        "The object being calibrated: a monotone quantile LSTM. "
         "The head is monotone by construction, so raw quantiles can never cross."
     )
 

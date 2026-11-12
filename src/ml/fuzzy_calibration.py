@@ -194,8 +194,15 @@ def compute_fuzzy_inputs(
 # numpy inference (no torch)
 # ---------------------------------------------------------------------------
 
-def _fis_numpy(spec: dict[str, object], x: np.ndarray) -> np.ndarray:
-    """Evaluate a Sugeno FIS stored in ``spec`` on ``x`` (n, n_inputs)."""
+def fis_forward(spec: dict[str, object], x: np.ndarray) -> dict[str, np.ndarray]:
+    """Evaluate a Sugeno FIS and return its internal activations.
+
+    Shapes assume ``n`` rows, ``p`` inputs and ``m`` membership functions:
+    ``membership`` is ``(n, p, m)``, ``rule_weight`` and
+    ``rule_contribution`` are ``(n, R)`` with ``R = m ** p``, and ``raw`` /
+    ``output`` are ``(n,)``. Contributions sum to ``raw`` before the optional
+    bounded output transform.
+    """
     centers = np.asarray(spec["centers"], dtype=float)
     widths = np.asarray(spec["widths"], dtype=float)
     n_inputs = centers.shape[0]
@@ -204,7 +211,7 @@ def _fis_numpy(spec: dict[str, object], x: np.ndarray) -> np.ndarray:
     if x.shape[1] != n_inputs:
         raise ValueError(f"expected {n_inputs} inputs, got {x.shape[1]}")
     d = (x[:, :, None] - centers[None, :, :]) / (widths[None, :, :] + 1e-9)
-    mu = np.exp(-0.5 * d * d)  # (n, n_inputs, n_mfs)
+    mu = np.exp(-0.5 * d * d)
     rule_idx = list(itertools.product(range(n_mfs), repeat=n_inputs))
     w = np.ones((x.shape[0], len(rule_idx)))
     for j, idx in enumerate(rule_idx):
@@ -214,15 +221,26 @@ def _fis_numpy(spec: dict[str, object], x: np.ndarray) -> np.ndarray:
     f = np.tile(cons[None, :], (x.shape[0], 1))
     lin = spec.get("linear_coefs")
     if lin is not None:
-        lin = np.asarray(lin, dtype=float)  # (R, n_inputs)
+        lin = np.asarray(lin, dtype=float)
         f = f + (lin[None, :, :] * x[:, None, :]).sum(axis=2)
     num = (w * f).sum(axis=1)
     den = w.sum(axis=1) + 1e-12
-    out = num / den
+    raw = num / den
     scale = float(spec.get("output_scale", 1.0))
-    if spec.get("bounded", True):
-        out = scale * np.tanh(out)
-    return out
+    out = scale * np.tanh(raw) if spec.get("bounded", True) else raw
+    return {
+        "membership": mu,
+        "rule_weight": w,
+        "rule_weight_normalized": w / den[:, None],
+        "rule_contribution": (w * f) / den[:, None],
+        "raw": raw,
+        "output": out,
+    }
+
+
+def _fis_numpy(spec: dict[str, object], x: np.ndarray) -> np.ndarray:
+    """Evaluate a Sugeno FIS stored in ``spec`` on ``x`` (n, n_inputs)."""
+    return fis_forward(spec, x)["output"]
 
 
 def _adjust_numpy(base: np.ndarray, m: np.ndarray, s: np.ndarray) -> np.ndarray:

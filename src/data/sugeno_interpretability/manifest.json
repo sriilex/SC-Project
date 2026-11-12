@@ -1,0 +1,64 @@
+{
+  "generated_at": "2026-11-12T20:29:04",
+  "prediction_key": "69e158d2977b",
+  "horizons": [
+    1,
+    7,
+    30,
+    90
+  ],
+  "splits": [
+    "valid",
+    "test"
+  ],
+  "parameters": "src/data/fuzzy_params/lstm_fuzzy_h*.json",
+  "equations": {
+    "membership": "mu_ik(x) = exp(-0.5 * ((x - c_ik) / w_ik)^2)",
+    "rule_weight": "w_r(x) = prod_i mu_i,k_i(x_i)",
+    "defuzzified": "raw(x) = sum_r w_r(x) f_r(x) / sum_r w_r(x)",
+    "bounded_output": "output(x) = scale * tanh(raw(x))",
+    "width_application": "p50' = p50 + s; p10' = p50' - (p50 - p10) * exp(m); p90' = p50' + (p90 - p50) * exp(m)"
+  },
+  "files": {
+    "membership_curves.csv": "Gaussian membership values on a dense x grid, with centres and widths.",
+    "rule_summary.csv": "Learned consequents plus mean/max normalised rule firing and contribution by split.",
+    "rule_activations.csv": "Per-forecast normalised firing and contribution for every rule.",
+    "forecast_effects.csv": "Per-forecast inputs, m, exp(m), s, base/adjusted quantiles, component deltas, coverage and pinball losses.",
+    "effect_summary.csv": "Pooled and per-class summaries of layer behaviour.",
+    "partial_dependence.csv": "One-input-at-a-time partial dependence over observed standardised inputs.",
+    "response_surfaces.csv": "Two-input FIS response on a standardised grid (h=1 and h=7, width and location)."
+  },
+  "row_counts": {
+    "forecast_effects": 6595,
+    "rule_activations": 102132,
+    "membership_curves": 13482,
+    "partial_dependence": 854,
+    "response_surfaces": 5766,
+    "effect_summary": 40,
+    "rule_summary": 120
+  },
+  "column_notes": {
+    "forecast_effects": {
+      "m": "Width FIS output: log multiplier on both half-widths.",
+      "width_multiplier": "exp(m); values below one narrow the interval, above one widen it.",
+      "s": "Location FIS output added to P50; P10 and P90 move with it.",
+      "s_relative": "s divided by the horizon's bounded location scale.",
+      "width_only_delta_*": "Quantile change from the width system alone.",
+      "loc_only_delta_*": "Quantile change from the location system alone.",
+      "delta_*": "Combined quantile/width change.",
+      "*_z": "Standardised FIS inputs actually seen by the membership functions."
+    },
+    "rule_summary": {
+      "antecedents": "Input membership indices in the learned rule order.",
+      "consequent": "Constant rule output before weighting and tanh.",
+      "activation_mean": "Mean normalised rule firing; all rules sum to one per forecast.",
+      "contribution_mean": "Mean weighted rule contribution to the raw FIS output."
+    }
+  },
+  "notes": [
+    "The width FIS uses cov_gap and vol_z at h=1 and h=7, and vol_z only at h=30 and h=90.",
+    "The location FIS uses bias_z and vol_z at every horizon.",
+    "Within-interval movement comes from s; exp(m) scales the lower and upper half-widths around the shifted median.",
+    "Rule activation is normalised by the sum of all rule weights for that forecast."
+  ]
+}

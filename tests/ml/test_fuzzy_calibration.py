@@ -11,7 +11,7 @@ from datetime import date, timedelta
 import numpy as np
 import polars as pl
 
-from ml.fuzzy_calibration import calibrate, compute_fuzzy_inputs, fit_fuzzy
+from ml.fuzzy_calibration import calibrate, compute_fuzzy_inputs, fis_forward, fit_fuzzy
 
 
 def _synthetic_frame(n: int = 160, seed: int = 0) -> pl.DataFrame:
@@ -87,6 +87,17 @@ def test_inputs_use_matured_outcomes() -> None:
     )
     after = compute_fuzzy_inputs(past, h).filter(pl.col("date") == t).row(0, named=True)
     assert (before["cov_gap"], before["bias_z"]) != (after["cov_gap"], after["bias_z"])
+
+
+def test_fis_trace_is_internally_consistent() -> None:
+    """Rule weights normalise to one and contributions add up to the raw output."""
+    spec = _identity_params()["width"]
+    x = np.array([[-2.0, 0.5], [0.0, 0.0], [1.5, -1.0]])
+    trace = fis_forward(spec, x)
+    assert trace["membership"].shape == (3, 2, 3)
+    assert np.allclose(trace["rule_weight_normalized"].sum(axis=1), 1.0)
+    assert np.allclose(trace["rule_contribution"].sum(axis=1), trace["raw"])
+    assert np.all(np.abs(trace["output"]) <= float(spec["output_scale"]))
 
 
 def test_calibrate_preserves_schema_order_and_ordering() -> None:

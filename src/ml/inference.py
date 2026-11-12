@@ -1,7 +1,7 @@
 """Live quantile inference backed by the cached LSTM ensemble.
 
 The exported-XGBoost path was removed together with the tree baselines.
-:class:`FreightPredictor` now serves the five-seed monotone quantile LSTM
+:class:`FreightPredictor` now serves the cached monotone quantile LSTM
 (via :mod:`ml.predictions`) and can apply the trained Sugeno fuzzy layer
 (via :mod:`ml.fuzzy_calibration`).
 """

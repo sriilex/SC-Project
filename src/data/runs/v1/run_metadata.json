@@ -1,0 +1,93 @@
+{
+  "run": "v1",
+  "generated_at": "2026-11-12T18:58:56",
+  "description": "Reference run quoted in the first paper draft. New runs get a new named directory.",
+  "lstm_prediction_key": "69e158d2977b",
+  "splits": {
+    "train": [
+      "2012-07-04",
+      "2022-07-25"
+    ],
+    "valid": [
+      "2023-01-03",
+      "2024-07-25"
+    ],
+    "test": [
+      "2025-01-02",
+      "2026-08-20"
+    ],
+    "embargo_days": 160
+  },
+  "horizons": [
+    1,
+    7,
+    30,
+    90
+  ],
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "lstm": {
+    "max_epochs": 100,
+    "hidden": 32,
+    "ensemble_seeds": 5
+  },
+  "calibration": {
+    "M_SCALE": 0.7,
+    "S_SCALE_PER_SD": 2.2,
+    "N_MATURED": 60,
+    "N_MATURED_INDEPENDENT": 5,
+    "matured_window_by_h": {
+      "1": 60,
+      "7": 60,
+      "30": 150,
+      "90": 450
+    },
+    "MIN_MATURED": 5,
+    "VOL_WINDOW": 14,
+    "burn_in_valid_start": "2023-01-03",
+    "optimizer": "full-batch Adam",
+    "lr": 0.05,
+    "epochs": 600,
+    "initial_consequents": 0.0
+  },
+  "conformal": {
+    "cqr_alpha": 0.2,
+    "aci": {
+      "gamma": 0.01,
+      "warmup": 20,
+      "score_buffer": 1000,
+      "feedback": "matured only (maturity queue)"
+    }
+  },
+  "bootstrap": {
+    "primary": "date-block bootstrap over consecutive dates, all classes together",
+    "block_length": "max(h, 5)",
+    "sensitivity": [
+      "half the primary length",
+      "twice the primary length"
+    ]
+  },
+  "artifact_files": [
+    "baseline_metrics.csv",
+    "baseline_metrics_common.csv",
+    "baseline_dm.csv",
+    "baseline_summary.md",
+    "main_table.csv",
+    "main_table.md",
+    "aci_diagnostics.csv",
+    "fuzzy_ablations.csv",
+    "fuzzy_seed_spread.csv",
+    "fuzzy_cqr_stack.csv",
+    "naive_sign_metrics.csv",
+    "interval_diagnostics.csv",
+    "interval_diagnostics_common.csv",
+    "interval_diagnostics_seed_spread.csv",
+    "interval_diagnostics_always_up.csv",
+    "fuzzy_params/"
+  ]
+}

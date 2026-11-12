@@ -1,11 +1,12 @@
 """Prediction cache for the quantile LSTM.
 
-Training the five-seed ensemble for four horizons is expensive, and the
-diagnostics, baseline suite and fuzzy calibration all consume the *same* raw
-predictions. This module fits once and caches the ensemble-mean and per-seed
-quantile frames under ``src/data/preds/``. The fitted model itself is cached too,
-so adding a split (e.g. the frozen test set) predicts only the missing frames
-instead of retraining.
+Training for four horizons is expensive, and the diagnostics, baseline suite
+and fuzzy calibration all consume the *same* raw predictions. This module fits
+once and caches the mean and per-seed quantile frames under
+``src/data/preds/``. The fitted model itself is cached too, so adding a split
+(e.g. the frozen test set) predicts only the missing frames instead of
+retraining. The default configuration uses one seed; pass ``seeds`` explicitly
+to build a seed ensemble.
 
 The cache key hashes the model/training configuration *and* the value
 fingerprint of the supplied frames, so changing seeds, epochs, hidden size or

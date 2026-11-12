@@ -1,0 +1,47 @@
+{
+  "kind": "constant_width_rollbias",
+  "h": 7,
+  "n_train": 1190,
+  "epochs": 600,
+  "lr": 0.05,
+  "objective": "pinball_0.1_0.5_0.9",
+  "matured_from": "2023-01-03",
+  "width_inputs": [
+    "cov_gap",
+    "vol_z"
+  ],
+  "loc_inputs": [
+    "bias_z",
+    "vol_z"
+  ],
+  "width_scale": 0.7,
+  "loc_scale": 0.2723870219863705,
+  "w_mean": [
+    -0.02313942973178197,
+    0.519946175700398
+  ],
+  "w_std": [
+    0.09779949125151016,
+    2.9282857684988883
+  ],
+  "l_mean": [
+    -0.058250711498065405,
+    0.519946175700398
+  ],
+  "l_std": [
+    0.5447730115244123,
+    2.9282857684988883
+  ],
+  "bias_mean": -0.058250711498065454,
+  "bias_std": 0.5447730115244123,
+  "raw_m": -0.15418705344200134,
+  "m": -0.10708368935064795,
+  "raw_s": null,
+  "s": null,
+  "rollbias_coef": 0.010712634772062302,
+  "width_coefs": null,
+  "width_bias": null,
+  "loc_coefs": null,
+  "loc_bias": null,
+  "final_train_pinball": 0.02596571296453476
+}

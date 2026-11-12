@@ -13,12 +13,19 @@ well defined.
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Final
 
 import numpy as np
 import polars as pl
 
 QUANTILES: Final[tuple[float, ...]] = (0.1, 0.5, 0.9)
+
+#: ACI learning rate, warm-up length and score-buffer size. Exposed so they can
+#: be written into run metadata instead of living as magic numbers.
+ACI_GAMMA: Final[float] = 0.01
+ACI_WARMUP: Final[int] = 20
+ACI_SCORE_BUFFER: Final[int] = 1000
 
 
 def attach_truth(pred: pl.DataFrame, source: pl.DataFrame, h: int) -> pl.DataFrame:
@@ -117,26 +124,35 @@ def aci_adjust(
     pred: pl.DataFrame,
     source: pl.DataFrame,
     h: int,
-    gamma: float = 0.01,
+    gamma: float = ACI_GAMMA,
     alpha: float = 0.2,
+    warmup: int = ACI_WARMUP,
+    score_buffer: int = ACI_SCORE_BUFFER,
     state: dict[str, object] | None = None,
 ) -> tuple[pl.DataFrame, dict[str, object]]:
-    """Adaptive conformal inference on the frozen quantiles (Gibbs & Candes 2021).
+    """Adaptive conformal inference with delayed (matured) feedback.
 
     Maintains a per-class target miscoverage level ``alpha_t`` for the central
     ``1 - alpha`` interval and a rolling buffer of base conformity scores
     ``E = max(p10 - y, y - p90)``. The adjusted interval is
     ``[p10 - w_t, p90 + w_t]`` where ``w_t`` is the empirical ``1 - alpha_t``
-    quantile of the *past* scores, so the correction is bounded by the observed
-    score distribution rather than drifting. ``alpha_t`` is updated with
-    ``alpha_t + gamma * (alpha - err_t)`` after seeing ``y_t``. P50 is left
-    unchanged. The returned state warm-starts the next split causally.
+    quantile of the *past, matured* scores, so the correction is bounded by the
+    observed score distribution rather than drifting.
+
+    A forecast issued at ``t`` for horizon ``h`` resolves only at ``t + h``.
+    The previous implementation updated ``alpha_t`` on the row's own outcome
+    immediately, so an outcome that was still unknown leaked into forecasts
+    issued before it matured. Here a small maturity queue holds pending
+    forecasts; at issue date ``t`` we first resolve every pending forecast with
+    maturity ``<= t``, then issue the current interval. ``alpha_t`` is updated
+    with ``alpha_t + gamma * (alpha - err)`` only when a forecast matures.
+    P50 is left unchanged. The returned state warm-starts the next split
+    causally and carries any still-unmatured forecasts across the boundary.
     """
     pred_idx = pred.with_row_index("_row")
     j = attach_truth(pred_idx, source, h)
     state = dict(state) if state else {}
     adj: dict[int, tuple[float, float, float]] = {}
-    WARMUP: Final[int] = 20
 
     d_sorted = j.sort(["target_class", "date"])
     for cls_frame in d_sorted.partition_by("target_class", maintain_order=True):
@@ -145,21 +161,51 @@ def aci_adjust(
         if isinstance(st, dict):
             a = float(st["alpha"])
             scores = list(st["scores"])
+            pending = list(st.get("pending", []))
         else:
-            a, scores = alpha, []
+            a, scores, pending = alpha, [], []
         for r in cls_frame.iter_rows(named=True):
+            issue_date = r["date"]
+
+            # Resolve forecasts whose outcome is observable at this issue date.
+            still_pending: list[dict[str, object]] = []
+            for item in pending:
+                maturity = item["maturity"]
+                if maturity is not None and maturity <= issue_date:
+                    y_i = float(item["y"])  # type: ignore[arg-type]
+                    err = 1.0 if (y_i < float(item["adj_p10"]) or y_i > float(item["adj_p90"])) else 0.0
+                    scores.append(
+                        max(float(item["base_p10"]) - y_i, y_i - float(item["base_p90"]))
+                    )
+                    if len(scores) > score_buffer:
+                        scores.pop(0)
+                    a = min(max(a + gamma * (alpha - err), 0.001), 0.5)
+                else:
+                    still_pending.append(item)
+            pending = still_pending
+
             y = float(r["y"])
             p10, p50, p90 = float(r["p_0.1"]), float(r["p_0.5"]), float(r["p_0.9"])
-            w = float(np.quantile(scores, 1.0 - a)) if len(scores) >= WARMUP else 0.0
+            w = float(np.quantile(scores, 1.0 - a)) if len(scores) >= warmup else 0.0
             new_p10 = p10 - w
             new_p90 = p90 + w
-            err = 1.0 if (y < new_p10 or y > new_p90) else 0.0
-            scores.append(max(p10 - y, y - p90))
-            if len(scores) > 1000:
-                scores.pop(0)
-            a = min(max(a + gamma * (alpha - err), 0.001), 0.5)
             adj[int(r["_row"])] = (new_p10, p50, new_p90)
-        state[cls] = {"alpha": a, "scores": scores}
+            pending.append({
+                "maturity": issue_date + timedelta(days=h),
+                "base_p10": p10,
+                "base_p90": p90,
+                "adj_p10": new_p10,
+                "adj_p90": new_p90,
+                "y": y,
+            })
+        state[cls] = {
+            "alpha": a,
+            "scores": scores,
+            "pending": pending,
+            "gamma": gamma,
+            "warmup": warmup,
+            "score_buffer": score_buffer,
+        }
 
     out = pred_idx.with_columns(
         pl.col("_row").replace_strict({k: v[0] for k, v in adj.items()}, default=None).alias("p_0.1"),
