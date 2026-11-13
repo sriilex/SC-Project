@@ -85,17 +85,23 @@ def load_config(path: Path) -> dict[str, Any]:
         return tomllib.load(f)
 
 
-def main() -> None:
-    """Run the sample generation pipeline."""
+def main(config_path: Path | None = None, *, include_test: bool = True) -> None:
+    """Build splits, optionally in an isolated config without creating test data."""
     _setup_logging()
-    
-    config_path = REPO_ROOT / "src" / "config" / "samples.toml"
+
+    config_path = config_path or REPO_ROOT / "src" / "config" / "samples.toml"
     config = load_config(config_path)
     
     master_path = REPO_ROOT / config["paths"]["master_parquet"]
     LOGGER.info(f"Loading master table from {master_path}")
     
-    master_long = pl.read_parquet(master_path)
+    master_scan = pl.scan_parquet(master_path)
+    if not include_test:
+        # Only load enough future levels to construct validation targets.
+        valid_end = date.fromisoformat(config["splits"]["test_start"]) - timedelta(days=config["splits"]["embargo_days"])
+        last_outcome = valid_end + timedelta(days=max(config["targets"]["horizons"]["days"]))
+        master_scan = master_scan.filter(pl.col("date") <= last_outcome)
+    master_long = master_scan.collect()
     
     LOGGER.info("Pivoting to wide format")
     master_wide = master_long.pivot(
@@ -259,35 +265,26 @@ def main() -> None:
     
     train_df = final_df.filter(pl.col("date") <= train_end)
     valid_df = final_df.filter((pl.col("date") >= valid_start) & (pl.col("date") <= valid_end))
-    test_df = final_df.filter(pl.col("date") >= test_start)
-    
-    out_dir = REPO_ROOT / "src" / "data"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    
+    split_frames = [("train", train_df), ("valid", valid_df)]
+    if include_test:
+        split_frames.append(("test", final_df.filter(pl.col("date") >= test_start)))
+
     train_path = REPO_ROOT / config["paths"]["samples_train"]
-    valid_path = REPO_ROOT / config["paths"]["samples_valid"]
-    test_path = REPO_ROOT / config["paths"]["samples_test"]
+    out_dir = train_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = REPO_ROOT / config["paths"]["samples_manifest"]
-    
-    train_df.write_parquet(train_path)
-    valid_df.write_parquet(valid_path)
-    test_df.write_parquet(test_path)
-    
-    LOGGER.info(f"Wrote train set: {train_path} ({train_df.height} rows)")
-    LOGGER.info(f"Wrote valid set: {valid_path} ({valid_df.height} rows)")
-    LOGGER.info(f"Wrote test set: {test_path} ({test_df.height} rows)")
-    
-    train_counts = train_df.group_by("target_class").agg(pl.len().alias("train_rows"))
-    valid_counts = valid_df.group_by("target_class").agg(pl.len().alias("valid_rows"))
-    test_counts = test_df.group_by("target_class").agg(pl.len().alias("test_rows"))
-    
-    counts = train_counts.join(valid_counts, on="target_class", how="outer_coalesce")
-    counts = counts.join(test_counts, on="target_class", how="outer_coalesce")
-    
-    LOGGER.info(f"Row counts per class:\n{counts}")
+    counts = None
+    for split_name, split_df in split_frames:
+        path = REPO_ROOT / config["paths"][f"samples_{split_name}"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        split_df.write_parquet(path)
+        LOGGER.info("Wrote %s set: %s (%d rows)", split_name, path, split_df.height)
+        split_counts = split_df.group_by("target_class").agg(pl.len().alias(f"{split_name}_rows"))
+        counts = split_counts if counts is None else counts.join(split_counts, on="target_class", how="full", coalesce=True)
+    LOGGER.info("Row counts per class:\n%s", counts)
 
     weekday_rows = []
-    for split_name, split_df in (("train", train_df), ("valid", valid_df), ("test", test_df)):
+    for split_name, split_df in split_frames:
         weekday_rows.append(weekday_composition(split_df, split_name, horizons))
     weekday_path = out_dir / "samples_weekday_composition.csv"
     pl.concat(weekday_rows).write_csv(weekday_path)
@@ -307,19 +304,11 @@ def main() -> None:
         feat_cols.append(f"cross_{cls}_ret_1")
         
     manifest_data = {
-        "split": ["train", "valid", "test"],
-        "start_date": [
-            train_df["date"].min(),
-            valid_df["date"].min(),
-            test_df["date"].min(),
-        ],
-        "end_date": [
-            train_df["date"].max(),
-            valid_df["date"].max(),
-            test_df["date"].max(),
-        ],
-        "rows": [train_df.height, valid_df.height, test_df.height],
-        "features": ["|".join(feat_cols)] * 3,
+        "split": [name for name, _ in split_frames],
+        "start_date": [frame["date"].min() for _, frame in split_frames],
+        "end_date": [frame["date"].max() for _, frame in split_frames],
+        "rows": [frame.height for _, frame in split_frames],
+        "features": ["|".join(feat_cols)] * len(split_frames),
     }
     
     manifest_df = pl.DataFrame(manifest_data)

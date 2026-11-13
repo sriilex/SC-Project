@@ -1,0 +1,7 @@
+{
+  "status": "failed_before_tuning_or_confirmation",
+  "reason": "44 nonpositive Capesize observations in early 2020 are outside the log-index domain; the initial daily input loader rejected them",
+  "test_read": false,
+  "retry": "compact_long_v2",
+  "fix": "Omit nonpositive values from logged daily inputs, warn explicitly, and use past-only LOCF on the feature calendar. Nonfinite targets are never filled. No hyperparameters were changed."
+}

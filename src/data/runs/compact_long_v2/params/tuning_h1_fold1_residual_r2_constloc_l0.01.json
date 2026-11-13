@@ -1,0 +1,48 @@
+{
+  "version": "compact-sugeno-v1",
+  "h": 1,
+  "n_rules": 2,
+  "fuzzy_location": false,
+  "width_feature": "error_ratio",
+  "location_feature": "median_bias",
+  "width_memberships": {
+    "center": -0.10397446544418601,
+    "scale": 0.4627651224782745,
+    "centers": [
+      -0.75,
+      0.75
+    ],
+    "width": 1.0
+  },
+  "location_memberships": {
+    "center": -0.28717158625705697,
+    "scale": 0.17480260901250963,
+    "centers": [
+      0.0
+    ],
+    "width": 1.0
+  },
+  "width_consequents": [
+    0.8551892268184681,
+    0.8551892268184683
+  ],
+  "location_consequents": [
+    -0.00566381991809628
+  ],
+  "width_bounds": [
+    0.4965853037914095,
+    2.0137527074704766
+  ],
+  "location_bound": 0.18156567093369066,
+  "shrinkage": 0.01,
+  "n_parameters": 3,
+  "stats": {
+    "n_fit": 987,
+    "loss_scale": 0.08252985042440485,
+    "fit_pinball": 0.009905031949387178,
+    "objective": 0.12001756817019686,
+    "solver": "scipy.optimize.linprog/highs",
+    "solver_status": 0,
+    "max_constraint_violation": 1.1102230246251565e-16
+  }
+}

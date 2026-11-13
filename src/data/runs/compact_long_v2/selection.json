@@ -1,0 +1,162 @@
+{
+  "1": {
+    "finalists": {
+      "volatility": {
+        "name": "volatility_r2_constloc_l0",
+        "family": "volatility",
+        "kwargs": {
+          "n_rules": 2,
+          "fuzzy_location": false,
+          "width_feature": "vol_ratio",
+          "location_feature": "vol_ratio",
+          "shrinkage": 0.0
+        },
+        "tuning_relative_vs_constant": -0.00169056748983476
+      },
+      "residual": {
+        "name": "residual_r3_constloc_l0",
+        "family": "residual",
+        "kwargs": {
+          "n_rules": 3,
+          "fuzzy_location": false,
+          "width_feature": "error_ratio",
+          "location_feature": "median_bias",
+          "shrinkage": 0.0
+        },
+        "tuning_relative_vs_constant": -0.005201050806386054
+      }
+    },
+    "nominated": {
+      "name": "residual_r3_constloc_l0",
+      "family": "residual",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": false,
+        "width_feature": "error_ratio",
+        "location_feature": "median_bias",
+        "shrinkage": 0.0
+      },
+      "tuning_relative_vs_constant": -0.005201050806386054
+    }
+  },
+  "7": {
+    "finalists": {
+      "volatility": {
+        "name": "volatility_r2_constloc_l0",
+        "family": "volatility",
+        "kwargs": {
+          "n_rules": 2,
+          "fuzzy_location": false,
+          "width_feature": "vol_ratio",
+          "location_feature": "vol_ratio",
+          "shrinkage": 0.0
+        },
+        "tuning_relative_vs_constant": -0.0013653100679404395
+      },
+      "residual": {
+        "name": "residual_r3_fuzzyloc_l0.1",
+        "family": "residual",
+        "kwargs": {
+          "n_rules": 3,
+          "fuzzy_location": true,
+          "width_feature": "error_ratio",
+          "location_feature": "median_bias",
+          "shrinkage": 0.1
+        },
+        "tuning_relative_vs_constant": -0.004038373505890924
+      }
+    },
+    "nominated": {
+      "name": "residual_r3_fuzzyloc_l0.1",
+      "family": "residual",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": true,
+        "width_feature": "error_ratio",
+        "location_feature": "median_bias",
+        "shrinkage": 0.1
+      },
+      "tuning_relative_vs_constant": -0.004038373505890924
+    }
+  },
+  "30": {
+    "finalists": {
+      "volatility": {
+        "name": "volatility_r3_constloc_l0",
+        "family": "volatility",
+        "kwargs": {
+          "n_rules": 3,
+          "fuzzy_location": false,
+          "width_feature": "vol_ratio",
+          "location_feature": "vol_ratio",
+          "shrinkage": 0.0
+        },
+        "tuning_relative_vs_constant": -0.0025951445155414365
+      },
+      "residual": {
+        "name": "residual_r2_constloc_l0.1",
+        "family": "residual",
+        "kwargs": {
+          "n_rules": 2,
+          "fuzzy_location": false,
+          "width_feature": "error_ratio",
+          "location_feature": "median_bias",
+          "shrinkage": 0.1
+        },
+        "tuning_relative_vs_constant": 0.0
+      }
+    },
+    "nominated": {
+      "name": "volatility_r3_constloc_l0",
+      "family": "volatility",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": false,
+        "width_feature": "vol_ratio",
+        "location_feature": "vol_ratio",
+        "shrinkage": 0.0
+      },
+      "tuning_relative_vs_constant": -0.0025951445155414365
+    }
+  },
+  "90": {
+    "finalists": {
+      "volatility": {
+        "name": "volatility_r3_fuzzyloc_l0.01",
+        "family": "volatility",
+        "kwargs": {
+          "n_rules": 3,
+          "fuzzy_location": true,
+          "width_feature": "vol_ratio",
+          "location_feature": "vol_ratio",
+          "shrinkage": 0.01
+        },
+        "tuning_relative_vs_constant": -0.021449764217535694
+      },
+      "residual": {
+        "name": "residual_r3_constloc_l0",
+        "family": "residual",
+        "kwargs": {
+          "n_rules": 3,
+          "fuzzy_location": false,
+          "width_feature": "error_ratio",
+          "location_feature": "median_bias",
+          "shrinkage": 0.0
+        },
+        "tuning_relative_vs_constant": -0.0010367514061019323
+      }
+    },
+    "nominated": {
+      "name": "volatility_r3_fuzzyloc_l0.01",
+      "family": "volatility",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": true,
+        "width_feature": "vol_ratio",
+        "location_feature": "vol_ratio",
+        "shrinkage": 0.01
+      },
+      "tuning_relative_vs_constant": -0.021449764217535694
+    }
+  }
+}

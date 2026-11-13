@@ -1,0 +1,240 @@
+{
+  "prediction_key": "1ac93085070a",
+  "test_read": false,
+  "classes": [
+    "Capesize",
+    "Panamax",
+    "Supramax"
+  ],
+  "log_domain_note": "Nonpositive daily indices cannot be logged and are omitted before causal feature-grid LOCF; nonfinite targets are never filled and are excluded on common support.",
+  "input_sha256": {
+    "samples_valid": "a14b49ab7b58b36ddcbf41e6a332cee718f81f43b69de683e22a9a758ce2094b",
+    "valid_predictions_h1": "b2c8ee4b0ca42c6559c5a8d42c9ef8faf3cf5bc8505a97f39ae5f753eb142f03",
+    "valid_predictions_h7": "6ff45a6ca845bfdd89f0c92481ea0471b48e05a11e112482b7f2cfad51350e06",
+    "valid_predictions_h30": "45395e41f431d778db6465fbb5b526618f9a66ffe8535f627fd53801060dad08",
+    "valid_predictions_h90": "909b80a38e2461a439fccd8d08fbb9d502bbc7fd372da7f61ec2141b42830635",
+    "daily_levels_through_validation_end": "9a51ab69d22bd5703558d4b1aee7a37674d7c04c85544f1f297e57e3bfa437bf"
+  },
+  "protocol_sha256": "d6c723ba9e5fb57ff79f0b581254fd785866e81adfa034310451133f93bc60c9",
+  "tuning_folds": [
+    [
+      "2022-01-01",
+      "2022-07-01"
+    ],
+    [
+      "2023-01-01",
+      "2023-07-01"
+    ]
+  ],
+  "source_dir": "src\\data\\runs\\long_calibration_v1",
+  "confirmation_start": "2024-04-01",
+  "candidate_grid": [
+    {
+      "name": "volatility_r2_constloc_l0",
+      "family": "volatility",
+      "kwargs": {
+        "n_rules": 2,
+        "fuzzy_location": false,
+        "width_feature": "vol_ratio",
+        "location_feature": "vol_ratio",
+        "shrinkage": 0.0
+      }
+    },
+    {
+      "name": "volatility_r2_constloc_l0.01",
+      "family": "volatility",
+      "kwargs": {
+        "n_rules": 2,
+        "fuzzy_location": false,
+        "width_feature": "vol_ratio",
+        "location_feature": "vol_ratio",
+        "shrinkage": 0.01
+      }
+    },
+    {
+      "name": "volatility_r2_constloc_l0.1",
+      "family": "volatility",
+      "kwargs": {
+        "n_rules": 2,
+        "fuzzy_location": false,
+        "width_feature": "vol_ratio",
+        "location_feature": "vol_ratio",
+        "shrinkage": 0.1
+      }
+    },
+    {
+      "name": "volatility_r3_constloc_l0",
+      "family": "volatility",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": false,
+        "width_feature": "vol_ratio",
+        "location_feature": "vol_ratio",
+        "shrinkage": 0.0
+      }
+    },
+    {
+      "name": "volatility_r3_constloc_l0.01",
+      "family": "volatility",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": false,
+        "width_feature": "vol_ratio",
+        "location_feature": "vol_ratio",
+        "shrinkage": 0.01
+      }
+    },
+    {
+      "name": "volatility_r3_constloc_l0.1",
+      "family": "volatility",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": false,
+        "width_feature": "vol_ratio",
+        "location_feature": "vol_ratio",
+        "shrinkage": 0.1
+      }
+    },
+    {
+      "name": "volatility_r3_fuzzyloc_l0",
+      "family": "volatility",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": true,
+        "width_feature": "vol_ratio",
+        "location_feature": "vol_ratio",
+        "shrinkage": 0.0
+      }
+    },
+    {
+      "name": "volatility_r3_fuzzyloc_l0.01",
+      "family": "volatility",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": true,
+        "width_feature": "vol_ratio",
+        "location_feature": "vol_ratio",
+        "shrinkage": 0.01
+      }
+    },
+    {
+      "name": "volatility_r3_fuzzyloc_l0.1",
+      "family": "volatility",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": true,
+        "width_feature": "vol_ratio",
+        "location_feature": "vol_ratio",
+        "shrinkage": 0.1
+      }
+    },
+    {
+      "name": "residual_r2_constloc_l0",
+      "family": "residual",
+      "kwargs": {
+        "n_rules": 2,
+        "fuzzy_location": false,
+        "width_feature": "error_ratio",
+        "location_feature": "median_bias",
+        "shrinkage": 0.0
+      }
+    },
+    {
+      "name": "residual_r2_constloc_l0.01",
+      "family": "residual",
+      "kwargs": {
+        "n_rules": 2,
+        "fuzzy_location": false,
+        "width_feature": "error_ratio",
+        "location_feature": "median_bias",
+        "shrinkage": 0.01
+      }
+    },
+    {
+      "name": "residual_r2_constloc_l0.1",
+      "family": "residual",
+      "kwargs": {
+        "n_rules": 2,
+        "fuzzy_location": false,
+        "width_feature": "error_ratio",
+        "location_feature": "median_bias",
+        "shrinkage": 0.1
+      }
+    },
+    {
+      "name": "residual_r3_constloc_l0",
+      "family": "residual",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": false,
+        "width_feature": "error_ratio",
+        "location_feature": "median_bias",
+        "shrinkage": 0.0
+      }
+    },
+    {
+      "name": "residual_r3_constloc_l0.01",
+      "family": "residual",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": false,
+        "width_feature": "error_ratio",
+        "location_feature": "median_bias",
+        "shrinkage": 0.01
+      }
+    },
+    {
+      "name": "residual_r3_constloc_l0.1",
+      "family": "residual",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": false,
+        "width_feature": "error_ratio",
+        "location_feature": "median_bias",
+        "shrinkage": 0.1
+      }
+    },
+    {
+      "name": "residual_r3_fuzzyloc_l0",
+      "family": "residual",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": true,
+        "width_feature": "error_ratio",
+        "location_feature": "median_bias",
+        "shrinkage": 0.0
+      }
+    },
+    {
+      "name": "residual_r3_fuzzyloc_l0.01",
+      "family": "residual",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": true,
+        "width_feature": "error_ratio",
+        "location_feature": "median_bias",
+        "shrinkage": 0.01
+      }
+    },
+    {
+      "name": "residual_r3_fuzzyloc_l0.1",
+      "family": "residual",
+      "kwargs": {
+        "n_rules": 3,
+        "fuzzy_location": true,
+        "width_feature": "error_ratio",
+        "location_feature": "median_bias",
+        "shrinkage": 0.1
+      }
+    }
+  ],
+  "legacy_references": [
+    "legacy_sugeno0",
+    "legacy_sugeno1_split"
+  ],
+  "uncertainty_note": "Exploratory date-block intervals do not adjust for model selection; the existing validation data were previously inspected.",
+  "status": "completed",
+  "exploratory_success": false,
+  "mean_horizon_relative_vs_constant": 0.004639306036663432,
+  "confirmation_end": "2024-07-25"
+}

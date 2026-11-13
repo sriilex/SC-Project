@@ -1,0 +1,46 @@
+{
+  "config": "src\\config\\samples_long_calibration.toml",
+  "test_read": false,
+  "base_train_start": "2012-07-04",
+  "base_train_end": "2019-07-25",
+  "calibration_start": "2020-01-02",
+  "calibration_end": "2024-07-25",
+  "base_train_n": 5293,
+  "calibration_n": 3419,
+  "base_seeds": [
+    0
+  ],
+  "base_max_epochs": 100,
+  "base_patience": 8,
+  "base_hidden": 32,
+  "train_sha256": "d09d382cf140cfbc7740eb15f25e340abae262b31a6b1b40d5ef17f6d3e6611b",
+  "valid_sha256": "a14b49ab7b58b36ddcbf41e6a332cee718f81f43b69de683e22a9a758ce2094b",
+  "status": "completed",
+  "prediction_key": "1ac93085070a",
+  "device": "cuda",
+  "h1": {
+    "n_predictions": 3168,
+    "first_issue": "2020-04-30",
+    "last_issue": "2024-07-25",
+    "elapsed_s": 6.452999999994063
+  },
+  "h7": {
+    "n_predictions": 3168,
+    "first_issue": "2020-04-30",
+    "last_issue": "2024-07-25",
+    "elapsed_s": 12.31199999999808
+  },
+  "h30": {
+    "n_predictions": 3168,
+    "first_issue": "2020-04-30",
+    "last_issue": "2024-07-25",
+    "elapsed_s": 23.85899999999674
+  },
+  "h90": {
+    "n_predictions": 3168,
+    "first_issue": "2020-04-30",
+    "last_issue": "2024-07-25",
+    "elapsed_s": 48.21899999999732
+  },
+  "elapsed_s": 48.21899999999732
+}

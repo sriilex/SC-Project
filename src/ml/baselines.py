@@ -82,7 +82,9 @@ def load_split(name: str) -> pl.DataFrame:
     df = pl.read_parquet(DATA / f"samples_{name}.parquet")
     floats = [c for c, t in df.schema.items() if t == pl.Float64]
     df = df.with_columns([pl.col(c).fill_nan(None) for c in floats])
-    return df.drop_nulls(["log_value"])
+    # Historical files can still contain Handysize; the current pooled model
+    # and paper explicitly use the three-class panel.
+    return df.filter(pl.col("target_class").is_in(CLASSES)).drop_nulls(["log_value"])
 
 
 def horizon_mask(df: pl.DataFrame, h: int) -> pl.DataFrame:

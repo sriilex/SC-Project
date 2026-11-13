@@ -1,0 +1,17 @@
+{
+  "artifact_checks": "passed",
+  "paper_changed": false,
+  "ml_tests": "46 passed",
+  "full_suite": "159 passed, 4 baseline optimizer failures before the final loader regression was added",
+  "baseline_failures_reproduced_on_HEAD": true,
+  "git_head": "f5ac65e17ac367321c488b5185121f02d05d9f17",
+  "code_sha256": {
+    "src/ml/compact_sugeno.py": "0ecd43de898e0c3942ccaffab4f90528d7937807de68a6efe490dbc565e6478c",
+    "src/ml/compact_sugeno_experiment.py": "646001321426491c81980b28088739d78b0a3cfe786b49792e44b4c1c4e7177e",
+    "src/ml/long_calibration.py": "f000362ab3cfe5d525c4f38efb756eacd3f198c1b8295b77bfb8f25a57f0abd5",
+    "src/ml/models/lstm.py": "33f4cb4abb761620e03f1743dbf9e1d2765b7b946256d1d3ae808b2e44c41001",
+    "src/ml/fuzzy_calibration.py": "d25a94bd3e1fcd3e62aac57fbbfdaeb3cc8eecc51af6b66cd48beb89b146a0d2",
+    "src/ml/datasets/build_samples.py": "23775bfc5a4240952102ac955664d4a7fbb18e2d66cd3e3ac0abfdbb6a750bf7",
+    "src/config/samples_long_calibration.toml": "aae5156c29de29cbdb472630965c3ffc0c1c164b8b13383b7766700d337339bb"
+  }
+}

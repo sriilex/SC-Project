@@ -1,0 +1,129 @@
+Immutable HEAD baseline: C:\Users\arkma\AppData\Local\Temp\sc-baseline-tests-sz9czain
+Exit: 1
+FFFF                                                                     [100%]
+================================== FAILURES ===================================
+______________________ test_optimal_entry_window_output _______________________
+
+    def test_optimal_entry_window_output():
+        v = Vessel(
+            vessel_id="V1",
+            vessel_class=VesselClass.SUPRAMAX,
+            current_port=PortEnum.PARADIP,
+            status="idle",
+            available_from=date(2025, 1, 1),
+            dwt=55_000,
+            draft_m=12.0,
+            speed_kn=12.0,
+            fuel_consumption_tpd=30.0,
+        )
+    
+        fan7 = ForecastFan(vessel_class=VesselClass.SUPRAMAX, horizon_days=7, p10=7000, p50=8000, p90=9000)
+        fan30 = ForecastFan(vessel_class=VesselClass.SUPRAMAX, horizon_days=30, p10=3000, p50=4000, p90=5000)
+    
+        inputs = OptimizerInputs(
+            vessels=[v],
+            parcels=[],
+            tc_quotes={VesselClass.SUPRAMAX: 12000.0},
+            planning_horizon_days=30,
+            contract_term_days=30,
+            forecasts=[fan7, fan30],
+            basis={}
+        )
+    
+        res = run_optimizer(inputs, target_class=VesselClass.SUPRAMAX)
+    
+        # Trough will be at day 30 since we interpolate between 8000 at day 7 and 4000 at day 30
+>       assert "Optimal entry window: Day 27 to 30 (P50 trough at ~$4,000/day)" in res.lock_wait_text
+                                                                                   ^^^^^^^^^^^^^^^^^^
+
+tests\optimizer\test_api.py:36: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = OptimizerRecommendation(target_vessel_class=<VesselClass.SUPRAMAX: 'Supramax'>, lock_action='WAIT', ceiling_usd_per_da..._savings_usd_per_day=-6441.040992875241, review_trigger=ReviewTrigger(schedule='WEEKLY', conditions=['BDI jumps >5%']))
+item = 'lock_wait_text'
+
+    def __getattr__(self, item: str) -> Any:
+        private_attributes = object.__getattribute__(self, '__private_attributes__')
+        if item in private_attributes:
+            attribute = private_attributes[item]
+            if hasattr(attribute, '__get__'):
+                return attribute.__get__(self, type(self))  # type: ignore
+    
+            try:
+                # Note: self.__pydantic_private__ cannot be None if self.__private_attributes__ has items
+                return self.__pydantic_private__[item]  # type: ignore
+            except KeyError as exc:
+                raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}') from exc
+        else:
+            # `__pydantic_extra__` can fail to be set if the model is not yet fully initialized.
+            # See `BaseModel.__repr_args__` for more details
+            try:
+                pydantic_extra = object.__getattribute__(self, '__pydantic_extra__')
+            except AttributeError:
+                pydantic_extra = None
+    
+            if pydantic_extra and item in pydantic_extra:
+                return pydantic_extra[item]
+            else:
+                if hasattr(self.__class__, item):
+                    return super().__getattribute__(item)  # Raises AttributeError if appropriate
+                else:
+                    # this is the current error
+>                   raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E                   AttributeError: 'OptimizerRecommendation' object has no attribute 'lock_wait_text'
+
+..\..\..\..\Documents\GitHub\SC-Project\.venv\Lib\site-packages\pydantic\main.py:1042: AttributeError
+________________ TestVesselClass.test_all_four_classes_present ________________
+
+self = <tests.optimizer.test_types.TestVesselClass object at 0x000002380635C500>
+
+    def test_all_four_classes_present(self):
+        classes = {vc.value for vc in VesselClass}
+>       assert classes == {"Capesize", "Panamax", "Supramax", "Handysize"}
+E       AssertionError: assert {'Capesize', ...', 'Supramax'} == {'Capesize', ...', 'Supramax'}
+E         
+E         Extra items in the right set:
+E         'Handysize'
+E         Use -v to get more diff
+
+tests\optimizer\test_types.py:18: AssertionError
+__________________ TestForecastFan.test_negative_tce_raises ___________________
+
+self = <tests.optimizer.test_types.TestForecastFan object at 0x000002380635DD60>
+
+    def test_negative_tce_raises(self):
+        with pytest.raises(ValueError, match="positive"):
+>           ForecastFan(vessel_class=VesselClass.HANDYSIZE, horizon_days=7, p10=-100.0, p50=5_000.0, p90=10_000.0)
+                                     ^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: type object 'VesselClass' has no attribute 'HANDYSIZE'
+
+tests\optimizer\test_types.py:40: AttributeError
+__________________ test_voyage_with_weather_and_port_delays ___________________
+
+    def test_voyage_with_weather_and_port_delays():
+        # Setup standard inputs
+        epoch_date = date(2026, 1, 1)
+    
+        vessels = [
+            Vessel(
+                vessel_id="V1",
+>               vessel_class=VesselClass.HANDYSIZE,
+                             ^^^^^^^^^^^^^^^^^^^^^
+                current_port=PortEnum.HALDIA,
+                status="idle",
+                available_from=epoch_date,
+                dwt=35000,
+                draft_m=8.0,
+                speed_kn=10.0,
+                fuel_consumption_tpd=20.0,
+            )
+        ]
+E       AttributeError: type object 'VesselClass' has no attribute 'HANDYSIZE'
+
+tests\optimizer\test_voyage_weather_logistics.py:14: AttributeError
+=========================== short test summary info ===========================
+FAILED tests/optimizer/test_api.py::test_optimal_entry_window_output - Attrib...
+FAILED tests/optimizer/test_types.py::TestVesselClass::test_all_four_classes_present
+FAILED tests/optimizer/test_types.py::TestForecastFan::test_negative_tce_raises
+FAILED tests/optimizer/test_voyage_weather_logistics.py::test_voyage_with_weather_and_port_delays
+4 failed in 1.21s
